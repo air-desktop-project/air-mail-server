@@ -5,14 +5,15 @@
 .\"
 .\" La version du .TH est réécrite à la construction du paquet par
 .\" scripts/paquet.sh : ne la corrigez pas à la main.
-.TH AIR-MAIL-SERVER 8 "2026-10-07" "air-mail-server 0.2.52" "Administration système"
+.TH AIR-MAIL-SERVER 8 "2026-10-08" "air-mail-server 0.2.53" "Administration système"
 .
 .SH NOM
 air-mail-server \- serveur de courrier SMTP, POP3, IMAP et HTTP
 .
 .SH SYNOPSIS
 .B air-mail-server
-.BI \-\-config " fichier"
+.RB [ \-\-config
+.IR fichier ]
 .br
 .B air-mail-server
 .RB [ \-\-help | \-\-version ]
@@ -39,8 +40,22 @@ découvre lequel des deux le serveur a cru.
 .SH OPTIONS
 .TP
 .BI \-\-config " fichier"
-la configuration binaire à lire. Obligatoire. Le serveur refuse de démarrer si
-le fichier manque, n'est pas lisible, ou ne se relit pas.
+la configuration binaire à lire.
+.B Sans elle,
+.IR /var/lib/air-mail/air-mail.conf .
+Le serveur refuse de démarrer si le fichier — nommé ou deviné — manque, n'est
+pas lisible, ou ne se relit pas, et sa plainte NOMME le chemin qu'il a tenté.
+.PP
+.B CE CHEMIN EST LE SEUL QUI SE DEVINE.
+Tous les autres — magasins, boîtes, clefs, registre, file — sont
+.B dans
+la configuration, en absolu, et aucun ne se déduit de celui-ci : deux machines
+peuvent ranger leurs boîtes à des endroits différents, et le font. Il n'existe
+.B ni
+variable d'environnement
+.B ni
+réglage à la compilation pour changer ce défaut — ce serait une seconde source
+de configuration, ce que ce serveur refuse.
 .TP
 .B \-\-help
 l'aide intégrée, puis sortie.

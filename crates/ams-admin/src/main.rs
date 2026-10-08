@@ -29,6 +29,18 @@ air-mail-admin — contrôle et configuration d'air-mail-server
 USAGE
     air-mail-admin <COMMANDE> [ARGUMENTS]
 
+LE CHEMIN DE LA CONFIGURATION SE DEVINE, LES AUTRES NON
+    `config show`, `token`, `audit` et `registre` prennent
+    /var/lib/air-mail/air-mail.conf quand on ne leur en nomme pas d'autre.
+    Un chemin fourni reste prioritaire.
+
+    `config write` NE LE DEVINE PAS : elle remplace le fichier ENTIER, et ce
+    qu'elle ne nomme pas est effacé. Elle exige donc sa cible.
+
+    LES MAGASINS NE SE DEVINENT PAS NON PLUS — comptes, applicatifs,
+    appareils, délégations, SCRAM. Ils sont nommés DANS la configuration, en
+    absolu, et deux machines ne les rangent pas forcément au même endroit.
+
 COMMANDES
     config write <fichier> [OPTIONS]
                         écrit une configuration BINAIRE. C'est le seul moyen
@@ -37,8 +49,9 @@ COMMANDES
                         LES SEUILS DU GARDE S'Y RÈGLENT (C8) : `config write
                         --help` les liste, et dit où zéro veut dire « jamais »
                         et où il veut dire « tout de suite ».
-    config show <fichier>
-                        relit une configuration et l'affiche.
+    config show [<fichier>]
+                        relit une configuration et l'affiche. SANS ARGUMENT,
+                        /var/lib/air-mail/air-mail.conf.
     account add <fichier> --login <nom> [--address <adresse>]...
                         ajoute ou remplace un compte. LE MOT DE PASSE SE LIT SUR
                         L'ENTRÉE STANDARD, jamais sur la ligne de commande : ce
@@ -107,7 +120,7 @@ COMMANDES
                         suivante — les jetons en cours restent donc valables
                         quand on change autre chose. Personne n'a besoin de le
                         connaître, et personne n'a donc à le garder.
-    token <config> --login <nom> [--minutes <n>]
+    token [<config>] --login <nom> [--minutes <n>]
                         frappe un jeton d'ADMINISTRATION, et l'écrit sur la
                         sortie standard. Il se scelle avec le secret que la
                         configuration porte, donc depuis la machine du serveur
@@ -130,17 +143,17 @@ COMMANDES
                         de secours quand son titulaire les a perdus : une
                         invitation ne vaut que pour un compte sans appareil.
                         Ses sessions cessent de valoir à la requête suivante.
-    audit <config> --login <nom> [--limit <n>]
+    audit [<config>] --login <nom> [--limit <n>]
                         le journal d'audit du compte : sessions, refus,
                         appareils, secrets, délégations, abonnements — une
                         ligne JSON par entrée, LA PLUS RÉCENTE D'ABORD, et 50
                         par défaut. EN LECTURE SEULE, depuis la machine du
                         serveur et par qui peut lire son répertoire.
-    registre verifie <config>
+    registre verifie [<config>]
                         vérifie le registre de réception : chaque fichier
                         entier, son sceau juste, et chacun chaîné au
                         précédent. Une faute rend un code 1.
-    registre cherche <config> [--ip <adresse>] [--domaine <d>]
+    registre cherche [<config>] [--ip <adresse>] [--domaine <d>]
                      [--message-id <id>] [--session <hex>]
                      [--depuis AAAA-MM-JJ] [--jusqu-a AAAA-MM-JJ] [--limit <n>]
                         les enregistrements qui correspondent, une ligne JSON
@@ -676,6 +689,26 @@ fn aide_demandee(mots: &[&str]) -> Option<&'static str> {
     Some(AIDE)
 }
 
+/// Vrai si ces mots ne commencent PAS par un chemin de configuration.
+///
+/// **UN CHEMIN NE COMMENCE JAMAIS PAR DEUX TIRETS**, et c'est ce qui permet
+/// d'omettre le fichier sans ambiguïté. Sans cette règle,
+/// `registre cherche --limit 20` prendrait `--limit` pour un nom de fichier, et
+/// `token --login thierry` chercherait à sceller un jeton avec une
+/// configuration nommée `--login` : deux échecs dont le message ne dirait pas
+/// la cause.
+///
+/// Aucun argument du tout compte aussi : `config show` tout seul veut le
+/// défaut.
+fn sans_chemin(mots: &[&str]) -> bool {
+    mots.first().is_none_or(|mot| mot.starts_with("--"))
+}
+
+/// Le chemin de la configuration quand la ligne de commande n'en nomme pas.
+fn configuration_par_defaut() -> PathBuf {
+    PathBuf::from(ams_config::CHEMIN_PAR_DEFAUT)
+}
+
 fn main() -> ExitCode {
     rendre_sigpipe_au_systeme();
     restreindre_le_masque();
@@ -697,6 +730,14 @@ fn main() -> ExitCode {
         ["summary", racine] => resumer(Path::new(racine)),
         ["vapid", chemin] => vapid(Path::new(chemin)),
         ["audit", fichier, "--login", nom] => lire_l_audit(Path::new(fichier), nom, 50),
+        ["audit", "--login", nom] => lire_l_audit(&configuration_par_defaut(), nom, 50),
+        ["audit", "--login", nom, "--limit", limite] => match limite.parse::<usize>() {
+            Ok(limite) if limite > 0 => lire_l_audit(&configuration_par_defaut(), nom, limite),
+            _ => {
+                eprintln!("air-mail-admin : `--limit` attend un nombre d'entrées, au moins un");
+                ExitCode::from(2)
+            }
+        },
         ["audit", fichier, "--login", nom, "--limit", limite] => match limite.parse::<usize>() {
             Ok(limite) if limite > 0 => lire_l_audit(Path::new(fichier), nom, limite),
             _ => {
@@ -705,6 +746,14 @@ fn main() -> ExitCode {
             }
         },
         ["registre", "verifie", fichier] => verifier_le_registre(Path::new(fichier)),
+        ["registre", "verifie"] => verifier_le_registre(&configuration_par_defaut()),
+        ["registre", "cherche", reste @ ..] if sans_chemin(reste) => match Recherche::lire(reste) {
+            Ok(recherche) => chercher_au_registre(&configuration_par_defaut(), &recherche),
+            Err(message) => {
+                eprintln!("air-mail-admin : {message}");
+                ExitCode::from(2)
+            }
+        },
         ["registre", "cherche", fichier, reste @ ..] => match Recherche::lire(reste) {
             Ok(recherche) => chercher_au_registre(Path::new(fichier), &recherche),
             Err(message) => {
@@ -712,8 +761,25 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        // **`config write` N'A PAS DE DÉFAUT, ET DIT POURQUOI.** Cette commande
+        // remplace le fichier ENTIER : sans chemin, une commande incomplète
+        // tapée par habitude réécrirait la configuration vivante avec le seul
+        // jeu d'options frappé, et effacerait tout le reste — dont le registre,
+        // sans lequel la réception refuse par `451`. Le bras doit venir AVANT
+        // celui qui suit, qui prendrait sinon `--domain` pour un nom de fichier.
+        ["config", "write", reste @ ..] if sans_chemin(reste) => {
+            eprintln!("air-mail-admin : `config write` exige le chemin du fichier à écrire.");
+            eprintln!("  Cette commande REMPLACE le fichier entier : ce qu'elle ne nomme pas");
+            eprintln!("  est effacé. Elle ne devine donc pas sa cible, à la différence de");
+            eprintln!("  `config show`, `token`, `audit` et `registre`.");
+            eprintln!("  Pour modifier la configuration en service, écrivez SUR UNE COPIE");
+            eprintln!("  d'elle — le secret de scellement est alors REPRIS — et comparez les");
+            eprintln!("  deux `config show` avant de basculer.");
+            ExitCode::from(2)
+        }
         ["config", "write", fichier, reste @ ..] => ecrire(Path::new(fichier), reste),
         ["config", "show", fichier] => montrer(Path::new(fichier)),
+        ["config", "show"] => montrer(&configuration_par_defaut()),
         ["account", "add", fichier, "--login", nom, reste @ ..] => match demande_de_compte(reste) {
             Ok((adresses, scram)) => ajouter(Path::new(fichier), nom, &adresses, scram.as_ref()),
             Err(message) => {
@@ -752,6 +818,13 @@ fn main() -> ExitCode {
                 }
             }
         }
+        ["token", reste @ ..] if sans_chemin(reste) => match jeton_demande(reste) {
+            Ok((nom, minutes)) => frapper(&configuration_par_defaut(), &nom, minutes),
+            Err(quoi) => {
+                eprintln!("air-mail-admin : {quoi}");
+                ExitCode::FAILURE
+            }
+        },
         ["token", fichier, reste @ ..] => match jeton_demande(reste) {
             Ok((nom, minutes)) => frapper(Path::new(fichier), &nom, minutes),
             Err(quoi) => {

@@ -101,15 +101,21 @@ const AIDE: &str = "\
 air-mail-server — serveur de courrier SMTP, POP3, IMAP et HTTP
 
 USAGE
-    air-mail-server --config <fichier>
+    air-mail-server [--config <fichier>]
 
 Le fichier de configuration est BINAIRE, et se produit avec
 `air-mail-admin config write`. Ce serveur n'a AUCUNE autre option de réglage :
 deux sources de configuration seraient une de trop.
 
-    --config <fichier>  la configuration
+    --config <fichier>  la configuration. SANS ELLE, /var/lib/air-mail/air-mail.conf
     --help              ce texte
     --version           la version
+
+LE DÉFAUT NE DÉDUIT RIEN D'AUTRE
+    Ce chemin-là est le seul qui se devine. Tous les autres — magasins, boîtes,
+    clefs, registre — sont DANS la configuration, en absolu, et n'ont aucune
+    raison d'être voisins : deux machines peuvent ranger leurs boîtes à des
+    endroits différents, et le font.
 
 CE QU'IL SERT, IL LE DIT AU DÉMARRAGE
     Les protocoles ouverts, les domaines servis, le chiffrement, les comptes —
@@ -135,6 +141,10 @@ async fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         ["--config", fichier] => PathBuf::from(fichier),
+        // **SANS ARGUMENT, LE DÉFAUT.** Il ne vaut que si personne n'en nomme
+        // un : `--config` reste prioritaire, et l'unité systemd livrée continue
+        // de le passer en clair pour que `systemctl cat` dise tout.
+        [] => PathBuf::from(ams_config::CHEMIN_PAR_DEFAUT),
         autre => {
             eprintln!("air-mail-server : arguments inattendus : {autre:?}");
             eprintln!("Essayez `air-mail-server --help`.");

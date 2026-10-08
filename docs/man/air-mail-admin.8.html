@@ -98,7 +98,7 @@ li { margin-bottom: .3rem; }
 </head>
 <body>
 <div class="page">
-<div class="bandeau"><span>air-mail-admin(8)</span><span>Administration système</span><span>air-mail-server 0.2.52</span></div>
+<div class="bandeau"><span>air-mail-admin(8)</span><span>Administration système</span><span>air-mail-server 0.2.53</span></div>
 <h1>air-mail-admin</h1>
 <p class="resume">contrôle et configuration d'air-mail-server</p>
 
@@ -110,9 +110,29 @@ air-mail-admin [--help | --version]</code></pre>
 <p><code>air-mail-admin</code> est la <strong>seule</strong> porte d'entrée de la
 configuration d'air-mail-server, et le seul moyen d'inspecter ses magasins. Le
 serveur lui-même n'a aucune option de réglage.</p>
-<p>Toutes les commandes agissent sur des <strong>fichiers nommés en
-argument</strong> : il n'y a ni chemin par défaut, ni fichier découvert, ni
-service à joindre. Une commande qui ne nomme pas de fichier ne touche à rien.</p>
+<p>Il n'y a ni fichier découvert, ni service à joindre : <strong>un seul chemin
+se devine</strong>, celui de la configuration.</p>
+
+<h3>Le chemin de la configuration se devine, les autres non</h3>
+<p><code>config show</code>, <code>token</code>, <code>audit</code> et
+<code>registre</code> prennent <code>/var/lib/air-mail/air-mail.conf</code> quand
+on ne leur en nomme pas d'autre. Un chemin fourni reste
+<strong>prioritaire</strong>, et la plainte nomme toujours le chemin réellement
+tenté.</p>
+<div class="cri">
+<p><strong><code>config write</code> ne le devine pas</strong>, et refuse en
+disant pourquoi : elle remplace le fichier <strong>entier</strong>, et ce qu'elle
+ne nomme pas est effacé. Une commande incomplète tapée par habitude réécrirait la
+configuration vivante avec le seul jeu d'options frappé — dont le registre, sans
+lequel la réception refuse par <code>451</code>.</p>
+</div>
+<p><strong>Les magasins ne se devinent pas non plus</strong> — comptes,
+applicatifs, appareils, délégations, SCRAM, boîtes. Ils sont nommés
+<strong>dans</strong> la configuration, en absolu, et deux machines ne les rangent
+pas forcément au même endroit. Un défaut en dur finirait par mentir.</p>
+<p>Un mot qui commence par <strong>deux tirets</strong> n'est jamais pris pour un
+chemin : c'est ce qui permet d'écrire <code>registre cherche --limit 20</code>
+sans que <code>--limit</code> soit lu comme un nom de fichier.</p>
 
 <h3>Trois règles qui valent pour tout</h3>
 <div class="cri">
@@ -155,8 +175,10 @@ qui n'est pas un conseil de prudence mais la seule procédure sûre.</p>
 </div>
 <p><code>config write --help</code> liste les 89 options et dit, pour chaque
 seuil, où zéro veut dire « jamais » et où il veut dire « tout de suite ».</p>
+<p><strong>Et elle ne devine pas sa cible</strong>, à la différence des quatre
+autres familles : sans chemin, elle refuse par un code 2 et dit pourquoi.</p>
 </dd>
-<dt>config show &lt;fichier&gt;</dt>
+<dt>config show [&lt;fichier&gt;]</dt>
 <dd><p>relit une configuration et l'affiche, y compris <strong>ce qu'elle ne
 porte pas</strong> : « AUCUN MAGASIN », « NON SERVI », « aucune ». C'est la seule
 source de vérité sur ce qu'une machine porte.
@@ -241,7 +263,7 @@ trois règles, plus haut.</p></dd>
 
 <h3>Jetons et clefs</h3>
 <dl>
-<dt>token &lt;config&gt; --login &lt;nom&gt; [--minutes &lt;n&gt;]</dt>
+<dt>token [&lt;config&gt;] --login &lt;nom&gt; [--minutes &lt;n&gt;]</dt>
 <dd><p>frappe un jeton d'<strong>administration</strong> et l'écrit sur la sortie
 standard. Il se scelle avec le secret que la configuration porte : donc depuis la
 machine du serveur, et par qui peut lire ce fichier.</p>
@@ -270,16 +292,16 @@ appareil. Ses sessions cessent de valoir à la requête suivante.</p></dd>
 
 <h3>Inspection</h3>
 <dl>
-<dt>audit &lt;config&gt; --login &lt;nom&gt; [--limit &lt;n&gt;]</dt>
+<dt>audit [&lt;config&gt;] --login &lt;nom&gt; [--limit &lt;n&gt;]</dt>
 <dd><p>le journal d'audit du compte : sessions, refus, appareils, secrets,
 délégations, abonnements. Une ligne JSON par entrée, <strong>la plus récente
 d'abord</strong>, 50 par défaut. En lecture seule, depuis la machine du
 serveur.</p></dd>
-<dt>registre verifie &lt;config&gt;</dt>
+<dt>registre verifie [&lt;config&gt;]</dt>
 <dd><p>vérifie le registre de réception : chaque fichier entier, son sceau juste,
 et chacun chaîné au précédent. Une faute rend un <strong>code de sortie
 1</strong>.</p></dd>
-<dt>registre cherche &lt;config&gt; [--ip &lt;adresse&gt;] [--domaine &lt;d&gt;] [--message-id &lt;id&gt;] [--session &lt;hex&gt;] [--depuis AAAA-MM-JJ] [--jusqu-a AAAA-MM-JJ] [--limit &lt;n&gt;]</dt>
+<dt>registre cherche [&lt;config&gt;] [--ip &lt;adresse&gt;] [--domaine &lt;d&gt;] [--message-id &lt;id&gt;] [--session &lt;hex&gt;] [--depuis AAAA-MM-JJ] [--jusqu-a AAAA-MM-JJ] [--limit &lt;n&gt;]</dt>
 <dd><p>les enregistrements qui correspondent, une ligne JSON chacun, dans l'ordre
 du temps — les <em>n</em> derniers, 100 par défaut. <code>--domaine</code> cherche
 dans le HELO, le PTR, le MAIL FROM, le From et les domaines SPF, DKIM et DMARC. En

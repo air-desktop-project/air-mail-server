@@ -5,7 +5,7 @@
 .\"
 .\" La version du .TH est réécrite à la construction du paquet par
 .\" scripts/paquet.sh : ne la corrigez pas à la main.
-.TH AIR-MAIL-ADMIN 8 "2026-10-07" "air-mail-server 0.2.52" "Administration système"
+.TH AIR-MAIL-ADMIN 8 "2026-10-08" "air-mail-server 0.2.53" "Administration système"
 .
 .SH NOM
 air-mail-admin \- contrôle et configuration d'air-mail-server
@@ -25,10 +25,43 @@ est la
 porte d'entrée de la configuration d'air\-mail\-server, et le seul moyen
 d'inspecter ses magasins. Le serveur lui\-même n'a aucune option de réglage.
 .PP
-Toutes les commandes agissent sur des
-.B fichiers nommés en argument
-: il n'y a ni chemin par défaut, ni fichier découvert, ni service à joindre.
-Une commande qui ne nomme pas de fichier ne touche à rien.
+Il n'y a ni fichier découvert, ni service à joindre :
+.B un seul chemin se devine,
+celui de la configuration.
+.
+.SS LE CHEMIN DE LA CONFIGURATION SE DEVINE, LES AUTRES NON
+.BR "config show" ,
+.BR token ,
+.B audit
+et
+.B registre
+prennent
+.I /var/lib/air-mail/air-mail.conf
+quand on ne leur en nomme pas d'autre. Un chemin fourni reste
+.BR prioritaire ,
+et la plainte nomme toujours le chemin réellement tenté.
+.PP
+.B «\ CONFIG WRITE\ » NE LE DEVINE PAS,
+et refuse en disant pourquoi : elle remplace le fichier
+.BR entier ,
+et ce qu'elle ne nomme pas est effacé. Une commande incomplète tapée par
+habitude réécrirait la configuration vivante avec le seul jeu d'options frappé
+— dont le registre, sans lequel la réception refuse par
+.BR 451 .
+.PP
+.B LES MAGASINS NE SE DEVINENT PAS NON PLUS
+— comptes, applicatifs, appareils, délégations, SCRAM, boîtes. Ils sont nommés
+.B dans
+la configuration, en absolu, et deux machines ne les rangent pas forcément au
+même endroit. Un défaut en dur finirait par mentir.
+.PP
+Un mot qui commence par
+.B deux tirets
+n'est jamais pris pour un chemin : c'est ce qui permet d'écrire
+.B "registre cherche --limit 20"
+sans que
+.B \-\-limit
+soit lu comme un nom de fichier.
 .
 .SS TROIS RÈGLES QUI VALENT POUR TOUT
 .TP
@@ -92,8 +125,12 @@ ci\-dessous, qui n'est pas un conseil de prudence mais la seule procédure sûre
 .B "config write --help"
 liste les 89 options et dit, pour chaque seuil, où zéro veut dire «\ jamais\ »
 et où il veut dire «\ tout de suite\ ».
+.IP
+.B ET ELLE NE DEVINE PAS SA CIBLE,
+à la différence des quatre autres familles : sans chemin, elle refuse par un
+code 2 et dit pourquoi.
 .TP
-.BI "config show " fichier
+.BI "config show " [ fichier ]
 relit une configuration et l'affiche, y compris
 .B ce qu'elle ne porte pas
 : «\ AUCUN MAGASIN\ », «\ NON SERVI\ », «\ aucune\ ». C'est la seule source de
@@ -209,8 +246,7 @@ révoque un mot de passe applicatif, sur\-le\-champ.
 .
 .SS Jetons et clefs
 .TP
-.BI "token " config " " [ \-\-minutes " n" ]
-.BI \-\-login " nom"
+.BI "token " [ config ] " " \-\-login " nom " [ \-\-minutes " n" ]
 frappe un jeton d'
 .B administration
 et l'écrit sur la sortie standard. Il se scelle avec le secret que la
@@ -247,18 +283,18 @@ appareil. Ses sessions cessent de valoir à la requête suivante.
 .
 .SS Inspection
 .TP
-.BI audit " config " \-\-login " nom " [ \-\-limit " n" ]
+.BI audit " " [ config ] " " \-\-login " nom " [ \-\-limit " n" ]
 le journal d'audit du compte : sessions, refus, appareils, secrets,
 délégations, abonnements. Une ligne JSON par entrée,
 .B la plus récente d'abord,
 50 par défaut. En lecture seule, depuis la machine du serveur.
 .TP
-.BI "registre verifie " config
+.BI "registre verifie " [ config ]
 vérifie le registre de réception : chaque fichier entier, son sceau juste, et
 chacun chaîné au précédent. Une faute rend un
 .B code de sortie 1.
 .TP
-.BI "registre cherche " config " " [ \-\-ip " adresse" ] [ \-\-domaine " d" ]
+.BI "registre cherche " [ config ] " " [ \-\-ip " adresse" ] [ \-\-domaine " d" ]
 .RI [ \-\-message-id " id" ] [ \-\-session " hex" ]
 .RI [ \-\-depuis " AAAA-MM-JJ" ] [ \-\-jusqu-a " AAAA-MM-JJ" ] [ \-\-limit " n" ]
 les enregistrements qui correspondent, une ligne JSON chacun, dans l'ordre du

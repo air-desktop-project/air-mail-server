@@ -98,12 +98,12 @@ li { margin-bottom: .3rem; }
 </head>
 <body>
 <div class="page">
-<div class="bandeau"><span>air-mail-server(8)</span><span>Administration système</span><span>air-mail-server 0.2.52</span></div>
+<div class="bandeau"><span>air-mail-server(8)</span><span>Administration système</span><span>air-mail-server 0.2.53</span></div>
 <h1>air-mail-server</h1>
 <p class="resume">serveur de courrier SMTP, POP3, IMAP et HTTP</p>
 
 <h2>Synopsis</h2>
-<pre><code>air-mail-server --config &lt;fichier&gt;
+<pre><code>air-mail-server [--config &lt;fichier&gt;]
 air-mail-server [--help | --version]</code></pre>
 
 <h2>Description</h2>
@@ -122,8 +122,19 @@ découvre lequel des deux le serveur a cru.</p>
 <h2>Options</h2>
 <dl>
 <dt>--config &lt;fichier&gt;</dt>
-<dd><p>la configuration binaire à lire. Obligatoire. Le serveur refuse de
-démarrer si le fichier manque, n'est pas lisible, ou ne se relit pas.</p></dd>
+<dd><p>la configuration binaire à lire. <strong>Sans elle,
+<code>/var/lib/air-mail/air-mail.conf</code>.</strong> Le serveur refuse de
+démarrer si le fichier — nommé ou deviné — manque, n'est pas lisible, ou ne se
+relit pas, et sa plainte <strong>nomme le chemin qu'il a tenté</strong>.</p>
+<div class="cri">
+<p><strong>Ce chemin est le seul qui se devine.</strong> Tous les autres —
+magasins, boîtes, clefs, registre, file — sont <strong>dans</strong> la
+configuration, en absolu, et aucun ne se déduit de celui-ci : deux machines
+peuvent ranger leurs boîtes à des endroits différents, et le font. Il n'existe
+<strong>ni</strong> variable d'environnement <strong>ni</strong> réglage à la
+compilation pour changer ce défaut — ce serait une seconde source de
+configuration, ce que ce serveur refuse.</p>
+</div></dd>
 <dt>--help</dt>
 <dd><p>l'aide intégrée, puis sortie.</p></dd>
 <dt>--version</dt>

@@ -145,6 +145,29 @@ mod ams_scram_capnp {
     include!("ams_scram_capnp.rs");
 }
 
+/// Le chemin de la configuration quand personne n'en nomme un.
+///
+/// **UN SEUL DÉFAUT, ET IL EST ICI.** `air-mail-server` et `air-mail-admin` le
+/// lisent tous les deux de cette constante : deux copies d'un chemin finissent
+/// par diverger, et c'est au premier déménagement qu'on s'en aperçoit.
+///
+/// Il n'existe NI variable d'environnement NI réglage à la compilation pour le
+/// changer. Ce serait une seconde source de configuration, ce que ce serveur
+/// refuse par principe (C12) : un chemin qui peut venir de deux endroits finit
+/// par venir du mauvais.
+///
+/// **CE DÉFAUT NE VAUT QUE SI RIEN N'EST FOURNI.** Une configuration existante
+/// nomme ses chemins en absolu — magasins, boîtes, clefs —, et aucun d'eux ne
+/// se déduit de celui-ci : les deux serveurs en service rangent leurs boîtes à
+/// des endroits différents, et c'est légitime.
+///
+/// **`config write` N'EN PROFITE PAS, DÉLIBÉRÉMENT.** Cette commande remplace
+/// le fichier ENTIER : sans chemin, une commande incomplète tapée par habitude
+/// réécrirait la configuration vivante avec le seul jeu d'options frappé, et
+/// effacerait tout le reste — dont le registre, sans lequel la réception refuse
+/// par `451`. Elle exige donc qu'on nomme sa cible, et le dit quand on l'omet.
+pub const CHEMIN_PAR_DEFAUT: &str = "/var/lib/air-mail/air-mail.conf";
+
 mod accounts;
 mod app_passwords;
 mod codec;

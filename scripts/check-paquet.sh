@@ -194,6 +194,18 @@ commencer
 # — ici on le vérifie sur le PAQUET, qui est ce que l'utilisateur reçoit.
 version=$(dpkg-deb -f "$deb" Version)
 [ -n "$version" ] || rate "le paquet ne déclare pas de \`Version\`"
+# **ET LA SOURCE AUSSI, parce qu'on la relit telle quelle.** `paquet.sh`
+# substitue la version dans le paquet : une source périmée produirait donc un
+# paquet juste, et le défaut ne se verrait qu'en lisant
+# `man ./docs/man/air-mail-admin.8` dans le dépôt. Un document qui annonce une
+# autre version que le code est un inventaire périmé, et ce dépôt en a trouvé
+# huit en deux audits — celui-ci ne passera plus.
+for page in air-mail-server air-mail-admin; do
+    for source in "docs/man/$page.8" "docs/man/$page.8.html"; do
+        grep -q "air-mail-server $version" "$source" || \
+            rate "\`$source\` annonce une autre version que \`$version\` — bump oublié"
+    done
+done
 for page in air-mail-server air-mail-admin; do
     roff="$essai/deballe/usr/share/man/man8/$page.8"
     html="$essai/deballe/usr/share/doc/air-mail-server/$page.8.html"
