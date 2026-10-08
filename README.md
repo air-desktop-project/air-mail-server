@@ -292,7 +292,7 @@ Les seules crates qui lisent, écrivent et attendent. Elles ne décident de rien
 | `ams-server` | le binaire `air-mail-server` | **il tourne** |
 | `ams-admin` | le binaire `air-mail-admin` | **`config write`, `config show`, `account add/list/remove`, `token`** |
 
-**Trente-quatre crates portent du code**, et ce tableau les nomme toutes :
+**Trente-huit crates portent du code**, et ce tableau les nomme toutes :
 `scripts/check-etages.sh` confronte ses lignes au contenu de `crates/`, et
 l'écart échoue. Un tableau tenu à la main dérive — celui-ci en décrivait
 vingt-quatre sur trente-quatre, et rien ne le disait ; toute la pile QUIC,
@@ -2606,7 +2606,7 @@ cargo test --workspace
 cargo fmt --all -- --check
 ```
 
-**Clippy passe par un script, et pas par la commande.** Il compte parmi les dix
+**Clippy passe par un script, et pas par la commande.** Il compte parmi les
 barrières depuis toujours, mais il était le seul à n'avoir aucun
 `scripts/check-*.sh` : il fallait se souvenir de le taper. Le 2026-09-06, une
 tranche est partie avec deux erreurs de lint, apprises en CI vingt-cinq minutes
@@ -2618,9 +2618,9 @@ plus tard. Le script porte la commande une fois, et la CI l'appelle lui.
 ./scripts/check-tout.sh
 ```
 
-Elle déroule les dix barrières du plus rapide au plus lent, ajoute les deux
+Elle déroule les onze barrières du plus rapide au plus lent, ajoute les deux
 étapes de la CI qui n'ont pas de script (`cargo build` et `cargo test`), et rend
-un tableau — sans s'arrêter au premier refus, parce que voir les dix verdicts
+un tableau — sans s'arrêter au premier refus, parce que voir les onze verdicts
 d'un coup vaut mieux que les découvrir un par un.
 
 Sa liste ne se recopie pas : elle se **dérive** du contenu de `scripts/`, et se
@@ -2716,8 +2716,11 @@ Le script tourne aussi en local :
 
 ## Dépendances
 
-**Dix-neuf dépendances externes en direct**, et **quatre-vingt-quatorze crates
-dans le graphe** d'`air-mail-server`. Mesuré le 2026-09-06 :
+**Vingt et une dépendances externes en direct**, et **quatre-vingt-quatorze
+crates dans le graphe** d'`air-mail-server`. Les deux nombres remesurés le
+2026-10-08 ; le second n'avait pas bougé, le premier disait encore dix-neuf —
+`p256` et `p384` s'étaient ajoutées sans que la phrase ni la liste plus bas ne
+les nomment :
 
 ```sh
 cargo tree -p ams-server --edges normal --prefix none | awk '{print $1}' \
@@ -2742,14 +2745,20 @@ Les directes, hors crates du dépôt : `tokio` et `libc` pour la boucle ; `capnp
 pour la configuration ; `rustls`, `rustls-rustcrypto`, `tokio-rustls` et `webpki`
 pour TLS ; `ml-kem` et `x25519-dalek` pour l'échange post-quantique ; `aes`,
 `aes-gcm`, `chacha20`, `chacha20poly1305`, `hkdf` et `sha2` pour QUIC et les
-condensats ; `rsa` et `ed25519-dalek` pour DKIM ; `argon2` pour les mots de
+condensats ; `rsa` et `ed25519-dalek` pour DKIM ; `p256` et `p384` pour les
+signatures d'appareil et les chaînes d'attestation ; `argon2` pour les mots de
 passe ; `flate2` pour les rapports TLSRPT.
 
 `libc` est déclarée en direct bien que tokio la tire déjà : `refuse_root` (C10)
 appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare.
 
-`libc` est déclarée en direct bien que tokio la tire déjà : `refuse_root` (C10)
-appelle `geteuid` elle-même, et une dépendance qu'on utilise se déclare.
+**Et chacune de ces vingt et une n'a qu'UNE version**, dans les deux verrous —
+`scripts/check-doublons.sh` le compte à chaque poussée. Ce n'était pas vrai :
+du 2026-08-28 au 2026-10-08, le binaire a porté `x25519-dalek` deux fois, la
+2.0.1 pour notre moitié du KEX hybride et la 3.0.0 pour TLS, parce que notre
+exigence avait divergé de celle de `rustls-rustcrypto`. Deux copies d'une crate
+de cryptographie, c'est une version qu'on croit avoir montée et qui tourne
+encore.
 
 Les crates des étages 1 et 2 n'en ont **aucune** : elles sont `#![no_std]` sans
 `alloc`.

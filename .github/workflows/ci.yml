@@ -131,6 +131,15 @@ jobs:
       - name: check-etages
         run: ./scripts/check-etages.sh
 
+      # ── UNE CRATE QUE NOUS DÉCLARONS ENTRE-T-ELLE DEUX FOIS ? ─────────
+      #
+      # Juste après `check-etages`, et pour la même raison : il lit deux
+      # fichiers et ne compile rien. Il répond sur le défaut qui a mis six
+      # semaines à se voir — deux `x25519-dalek` dans le binaire, parce que
+      # notre exigence avait divergé de celle de `rustls-rustcrypto`.
+      - name: check-doublons
+        run: ./scripts/check-doublons.sh
+
       # ── LES DEUX PORTÉES COMPILENT-ELLES ? ────────────────────────────
       #
       # AVANT CLIPPY, et pour la même raison qui met `check-etages` en tête : ce

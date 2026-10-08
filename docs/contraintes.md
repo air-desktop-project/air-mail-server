@@ -3946,6 +3946,31 @@ Ce n'est pas l'amont qui a appris : c'est ce serveur qui vérifie désormais
 lui-même, en signant quelques octets et en vérifiant la signature CONTRE le
 certificat. Voir [la tranche qui l'a fermée](#un-certificat-lu-une-fois-et-jamais-relu).
 
+### Le binaire a porté DEUX X25519 pendant six semaines
+
+Trouvé le 2026-10-08, en relisant le graphe pour une autre raison. Depuis
+`b7e53e902` — le 2026-08-28, le commit même qui a posé l'échange de clés
+hybride —, `Cargo.lock` portait `x25519-dalek` **deux fois** : la **2.0.1**, que
+notre manifeste demandait pour la moitié classique du KEX, et la **3.0.0**, que
+`rustls-rustcrypto` demande pour TLS. Notre exigence écrivait `"2"` quand celle
+d'amont écrivait `"3"` ; cargo a résolu les deux, et c'est tout ce qu'il avait à
+faire.
+
+**Ce n'est pas de l'embonpoint.** C'est une version qu'on croit avoir montée et
+qui tourne encore, sous la crate qui fait la moitié classique de l'échange de
+clés que cette contrainte-ci rend obligatoire — et un avis de sécurité sur la
+2.x qu'on lirait en se croyant couvert par la 3.0.
+
+Le manifeste l'interdisait déjà, mais seulement à propos de `rsa`, et en prose :
+« en prendre une autre mettrait DEUX `rsa` dans le binaire — deux
+implémentations de la même arithmétique, dont une seule serait revue le jour
+d'un avis de sécurité ». La règle était juste et **rien ne la vérifiait**.
+
+Le passage en `"3"` n'a demandé aucun changement de code, et
+`scripts/check-doublons.sh` compte désormais, dans les DEUX verrous, chaque
+crate que nous déclarons nous-mêmes — le périmètre exact du défaut : notre
+déclaration qui diverge de celle d'une dépendance qui la tire aussi.
+
 ---
 
 ## Ce que les contraintes ont changé dans le dépôt
@@ -4470,11 +4495,17 @@ suite d'essais — elle a rattrapé une ouverture de relais écrite dans la minu
 **UNE GARDE QUI EN FAIT DEUX SE SÉPARE EN DEUX**, et chacune dit son nom. Sans
 quoi la seconde disparaît avec la première, en silence, et rien ne la pleure.
 
-## Ce que valent les dix barrières, éprouvé une à une
+## Ce que valent les onze barrières, éprouvé une à une
 
 Le 2026-09-06, chaque barrière a été confrontée à un défaut qu'elle prétend
 voir. **C'est la seule mesure qui dise quelque chose** : une barrière verte
 depuis des mois prouve seulement qu'elle ne dit pas non.
+
+`check-doublons` est née plus tard, le 2026-10-08, et elle a été éprouvée de la
+même façon le jour même : **le verrou de `0850e42a1`, qui portait les deux
+`x25519-dalek`, lui a été soumis tel quel**. Elle a nommé la crate, rendu les
+deux versions, dit la commande de réparation, et sorti à 1. Le défaut n'était
+pas injecté — il était réel, et vieux de six semaines.
 
 | barrière | défaut injecté | verdict |
 |---|---|---|
