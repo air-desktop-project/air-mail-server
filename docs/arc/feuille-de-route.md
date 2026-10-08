@@ -131,7 +131,60 @@ programme local qui veut déposer du courrier sur ces machines :
 | `Connection refused` sur le 25 | la redirection `nftables` vit dans `prerouting`, qui ne voit QUE ce qui vient du dehors ; un paquet né sur la machine passe par `output` | viser le port d'écoute réel, **2525** |
 | `554 5.6.0 Bare CR or LF in message data` | les en-têtes portaient des CRLF, le corps venait d'une chaîne Python et avait des fins de ligne nues | normaliser **tout** le message en CRLF (RFC 5321 §2.3.8) |
 | `FileNotFoundError` sur le secret | `ProtectHome=yes` cache `/root` au service | le secret va dans `/etc/air-mail/`, pas dans `/root` |
+| le MX de narro.ch en boucle de redémarrage, 20 h plus tard | le répertoire `/etc/air-mail` créé en `0700 root:root` pour y poser ce secret — voir ci-dessous | `chmod 0755 /etc/air-mail` ; les secrets se protègent par LEUR mode, pas par celui du répertoire |
 | `535 Authentication credentials invalid` | voir ci-dessous — et c'est le piège qui coûte le plus cher |
+
+### LE RÉPERTOIRE DU SECRET A COUPÉ LE COURRIER DE narro.ch
+
+Poser le secret dans `/etc/air-mail/` a créé ce répertoire en **`0700
+root:root`**. Or il en contenait déjà un autre : **`scram.key`**, la clé de
+scellement du magasin SCRAM, que le serveur lit au démarrage. Le compte
+`air-mail` ne pouvait plus **traverser** le répertoire.
+
+**RIEN NE S'EST VU PENDANT VINGT HEURES.** Le serveur tournait : il avait lu la
+clé à son démarrage précédent, et un processus vivant ne relit pas ses
+fichiers. Le prochain redémarrage était une bombe armée, et c'est la pose de la
+0.2.53, le lendemain matin, qui l'a déclenchée :
+
+```
+air-mail-server : clé SCRAM `/etc/air-mail/scram.key` : Permission denied (os error 13)
+air-mail-server.service: Scheduled restart job, restart counter is at 421.
+```
+
+Quatre cent vingt et un redémarrages, et le courrier de `narro.ch` coupé —
+IMAP, SMTP et la soumission. Le correctif tient en un mot : `chmod 0755
+/etc/air-mail`. **Un secret se protège par SON mode** — `scram.key` est en
+`0600 air-mail`, `releve-arc.secret` en `0600 root` —, jamais par celui du
+répertoire qui le porte, car ce répertoire est partagé.
+
+### ET LA VÉRIFICATION DE POSE N'A RIEN VU NON PLUS
+
+Le script de pose a annoncé « service : active, 4 ports, idem » cinq secondes
+après le `dpkg -i`. Les deux mesures étaient fausses, et pour une raison qui
+vaut pour **toute** vérification de déploiement sur ce serveur :
+
+**L'UNITÉ EST EN `Type=simple`.** systemd déclare le service `active` dès que le
+processus est *lancé*, sans attendre aucun signal de disponibilité. Un serveur
+qui démarre, annonce tout son journal, puis meurt sur la dernière ligne, est
+`active` le temps de mourir — et l'écouteur qu'il a ouvert répond encore quand
+on compte les ports.
+
+Ce qui prouve qu'un MX est en service est **une connexion authentifiée de bout
+en bout**, répétée après un délai :
+
+```sh
+# IMAPS, et la boîte s'ouvre vraiment
+python3 - <<'FIN'
+import imaplib, ssl
+m = imaplib.IMAP4_SSL("mail.narro.ch", 993, ssl_context=ssl.create_default_context())
+m.login("<compte>", "<secret>")
+print(m.select("INBOX", readonly=True))
+m.logout()
+FIN
+```
+
+**Et un `systemctl show … -p NRestarts`** : un compteur qui grimpe dit la boucle
+que `is-active` cache.
 
 ### LE PIÈGE DU MAGASIN DE MOTS DE PASSE APPLICATIFS
 
