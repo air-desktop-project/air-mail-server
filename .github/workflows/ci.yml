@@ -64,6 +64,45 @@ env:
   # Un avertissement non traité est une régression qui attend son heure.
   RUSTFLAGS: -D warnings
 
+# ── L'IMAGE EST ÉPINGLÉE, POUR LA RAISON QUI ÉPINGLE LA TOOLCHAIN ───────────
+#
+# `ubuntu-26.04` et non `ubuntu-latest`. Les deux désignent la même image
+# aujourd'hui ; ce n'est pas le choix de la version qui est en jeu, c'est le
+# fait qu'un label roulant **désigne une chose différente selon le jour**.
+#
+# `rust-toolchain.toml` dit déjà pourquoi, à propos de `channel` : « un
+# `channel = "stable"` désigne une version différente toutes les six semaines ;
+# deux mesures prises à deux mois d'écart ne sont alors plus comparables, et un
+# échec de CI ne dit plus si c'est le code ou l'amont qui a bougé. » Le même
+# argument vaut mot pour mot pour l'image du runner, et il n'y était pas.
+#
+# **ET LA FENÊTRE DE MIGRATION LE REND CONCRET.** GitHub fait passer
+# `ubuntu-latest` de l'image Ubuntu 24 à Ubuntu 26 **par vagues, du 19 octobre
+# au 19 novembre 2026** : pendant un mois, deux exécutions successives du même
+# workflow peuvent tomber l'une sur 24 et l'autre sur 26. Or `paquet.sh` ne
+# devine pas ses dépendances — `dpkg-shlibdeps` LIT le binaire —, si bien que
+# la même version du paquet sortirait avec **deux planchers `libc6`
+# différents**, sans que rien ne le dise. Ce n'est pas un décalage, c'est du
+# non-déterminisme.
+#
+# **POURQUOI 26 ET NON 24** : les deux MX qui reçoivent ce logiciel tournent
+# **Ubuntu 26.04 LTS, glibc 2.43** — relevé le 2026-10-08 sur les deux, et
+# `ubuntu-24.04` garderait donc un plancher plus vieux que toute machine du
+# parc. On épingle la version des cibles, pas celle d'hier.
+#
+# Ce qui borne la portée de tout ceci, et qu'il faut savoir : le `.deb` déployé
+# n'est PAS celui de cette CI. Il se construit sur le MX lui-même
+# (`/root/build/air-mail-server` + `scripts/paquet.sh`), parce que l'étape 10
+# de `check-paquet.sh` EXÉCUTE ce qu'elle déballe — croisé ou bâti ailleurs, le
+# binaire serait empaqueté sans avoir jamais tourné sur sa cible. Celui d'ici
+# est un artefact de contrôle.
+#
+# Ce que cette CI attend de l'image, et qu'elle n'installe pas : `dpkg-dev`
+# (`dpkg-deb`, `dpkg-shlibdeps`) et `openssl`. Sans le second, les bancs QUIC
+# et TLS ne fabriquent aucun certificat — ils se sautent en DISANT pourquoi
+# (`SANS_OPENSSL`), ce qui est la seule façon acceptable de ne pas éprouver.
+#
+# L'arm64 n'est pas servi ici : ce dépôt ne produit qu'un paquet `amd64`.
 jobs:
   # ── Le gate DCO ────────────────────────────────────────────────────────────
   #
@@ -72,7 +111,7 @@ jobs:
   # Le noyer dans le job de build rendrait son échec illisible.
   dco:
     name: DCO et paternité
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
         with:
@@ -107,7 +146,7 @@ jobs:
   # ── La vérification du code ────────────────────────────────────────────────
   verification:
     name: fmt, clippy, build, tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
 
@@ -268,7 +307,7 @@ jobs:
   # rendrait cette dernière lente pour rien.
   couverture:
     name: couverture 100 % (C2)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
 
@@ -304,7 +343,7 @@ jobs:
   # autre. C'est exactement la distinction que `rust-toolchain.toml` établit.
   fuzz:
     name: smoke-fuzz (C3)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
 
