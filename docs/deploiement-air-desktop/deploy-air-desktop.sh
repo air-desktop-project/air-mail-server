@@ -312,6 +312,15 @@ etape_configurer_systeme() {
     mkdir -p "$ETAT_DIR/audit" || return 1
     mkdir -p "$ETAT_DIR/brouillons" || return 1
     mkdir -p "$ETAT_DIR/rapports-dmarc" || return 1
+    # **LE RÉPERTOIRE D'ÉTAT D'`air-service-locator` (0.2.65).** Il porte la
+    # fiche d'identité de cette machine — la moitié privée de sa clé —, et
+    # `air-mail-admin asl enroll` REFUSE de le créer : il devrait alors inventer
+    # son propriétaire, alors que la fiche hérite précisément de celui-ci. C'est
+    # donc ici qu'il naît, au nom du compte qui fait tourner le serveur.
+    #
+    # Le créer ne fait RIEN annoncer : tant que `--asl-state` n'est pas dans la
+    # configuration, le serveur dit « annonce ASL ÉTEINTE » et sert comme avant.
+    mkdir -p "$ETAT_DIR/asl" || return 1
     
     # Définir les permissions
     chown -R "$COMPTE_SYSTEME:$COMPTE_SYSTEME" "$ETAT_DIR" || return 1
@@ -326,6 +335,10 @@ etape_configurer_systeme() {
     chmod 0700 "$ETAT_DIR/audit" || return 1
     chmod 0700 "$ETAT_DIR/brouillons" || return 1
     chmod 0700 "$ETAT_DIR/rapports-dmarc" || return 1
+    # **LA FICHE D'IDENTITÉ ASL DOIT ÊTRE ILLISIBLE PAR LES AUTRES COMPTES** :
+    # le serveur refuse de démarrer sur une fiche en 0644, et `asl` refuse de la
+    # lire. Le répertoire qui la porte suit la même règle.
+    chmod 0700 "$ETAT_DIR/asl" || return 1
     
     # Installer les binaires
     dit "Installation des binaires..."

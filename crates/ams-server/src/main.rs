@@ -2269,6 +2269,11 @@ async fn servir(fichier: &Path) -> Result<(), String> {
         None => politique,
     };
     let registre = registre_de_reception(&options)?;
+    // **L'ATTACHE VIT AUSSI LONGTEMPS QUE CE SERVEUR**, et c'est la raison de
+    // ce `let` : la connexion EST le bail, cette valeur la possède, et sa
+    // destruction est le retrait. La lier ici lui donne exactement la durée de
+    // vie des écoutes.
+    let attache_asl = annoncer_aux_annuaires(&options)?;
     // **LE MÊME MAGASIN POUR LA POLITIQUE ET POUR L'API** : l'une y vérifie,
     // l'autre y crée et y révoque.
     let politique = match &applicatifs {
@@ -3143,6 +3148,21 @@ async fn servir(fichier: &Path) -> Result<(), String> {
             );
         }
     }
+
+    // **LE RETRAIT S'ANNONCE, ET NE SE SUBIT PAS.** Lâcher l'attache fermerait
+    // la socket sans rien dire, et l'annuaire ne l'apprendrait qu'à
+    // l'expiration d'inactivité — une minute pendant laquelle il donnerait les
+    // adresses d'un serveur arrêté. Fermer proprement fait rendre « parti
+    // (volontaire) » plutôt que « parti (inactivité) », et celui qui regarde ne
+    // traite pas les deux pareil.
+    if let Some(attache) = attache_asl {
+        let compte = attache.etat();
+        attache.retirer().await;
+        eprintln!(
+            "air-mail-server : annonce ASL retirée — {} attache(s), {} rupture(s), {} refus",
+            compte.attaches, compte.ruptures, compte.refus
+        );
+    }
     Ok(())
 }
 
@@ -3189,6 +3209,183 @@ impl ams_loop_tokio::Bounced for RapportsLocaux {
         }
         true
     }
+}
+
+/// Lance l'annonce auprès des annuaires `air-service-locator`, si elle est
+/// réglée.
+///
+/// # ÉTEINTE PAR DÉFAUT, COMME LE RELAIS ET COMME L'API
+///
+/// Un répertoire d'état vide veut dire « on ne s'annonce pas », et c'est ce
+/// qu'un fichier écrit avant ce champ décode. Un serveur qui s'annoncerait de
+/// lui-même publierait l'existence de ses écoutes à un tiers que son
+/// exploitant n'a pas choisi.
+///
+/// # UN RÉPERTOIRE POSÉ SANS FICHE LISIBLE EMPÊCHE DE DÉMARRER
+///
+/// Et c'est délibéré. Annoncer est un engagement envers des clients qui vont
+/// s'y fier pour trouver ce serveur ; démarrer en silence sans pouvoir le tenir
+/// serait pire que de ne pas démarrer. C'est la règle de SCRAM, dont un
+/// chargement en échec empêche aussi le démarrage plutôt que de servir un
+/// mécanisme qui ne marcherait pour personne.
+///
+/// # LA FICHE DOIT ÊTRE ILLISIBLE PAR LES AUTRES COMPTES
+///
+/// Elle porte la moitié privée de la clé de cette machine. Le contrôle est ici
+/// et non dans `ams-asl`, parce qu'interroger un `stat` est une entrée-sortie
+/// (C1) — et `asl` refuse la même chose, pour la même raison : une clé lisible
+/// par d'autres n'est plus une clé.
+fn annoncer_aux_annuaires(
+    options: &Configuration,
+) -> Result<Option<ams_loop_tokio::AttacheAsl>, String> {
+    if options.asl.state.is_empty() {
+        eprintln!(
+            "air-mail-server : annonce ASL ÉTEINTE — aucun annuaire n'apprend où joindre \
+             ce serveur (`air-mail-admin asl enroll <code>`, puis `config write … \
+             --asl-state … --asl-announce <nom>=<tcp|udp>:<port>`)"
+        );
+        return Ok(None);
+    }
+
+    let etat = Path::new(&options.asl.state);
+    let fiche = etat.join(ams_asl::fiche::NOM_DU_FICHIER);
+
+    // **LE MODE AVANT LE CONTENU.** Une clé lisible par le groupe ou par les
+    // autres n'est plus une clé : c'est une clé partagée avec qui sait
+    // s'asseoir sur la machine.
+    let details = std::fs::metadata(&fiche)
+        .map_err(|erreur| format!("fiche d'identité ASL `{}` : {erreur}", fiche.display()))?;
+    let mode = std::os::unix::fs::MetadataExt::mode(&details) & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "fiche d'identité ASL `{}` est en {mode:04o} — une clé lisible par d'autres \
+             n'est plus une clé. Corrigez avec : chmod 600 {}",
+            fiche.display(),
+            fiche.display()
+        ));
+    }
+
+    let contenu = std::fs::read_to_string(&fiche)
+        .map_err(|erreur| format!("fiche d'identité ASL `{}` : {erreur}", fiche.display()))?;
+    let lue = ams_asl::lire_une_fiche(&contenu)
+        .map_err(|quoi| format!("fiche d'identité ASL `{}` : {quoi}", fiche.display()))?;
+    let machine = lue.identite.machine();
+
+    // **LE JEU ENTIER SE VALIDE D'ABORD**, et non annonce par annonce : le
+    // doublon de nom ne se voit que sur l'ensemble, et une réannonce du même
+    // nom remplace la précédente. `config write` l'a déjà refusé — on le
+    // revérifie, parce qu'un fichier peut avoir été écrit par une version qui
+    // ne le refusait pas.
+    let declarations: Vec<ams_asl::Declaration<'_>> = options
+        .asl
+        .services
+        .iter()
+        .map(|service| ams_asl::Declaration {
+            nom: service.name.as_str(),
+            protocole: match service.protocol {
+                ams_config::AslProtocol::Tcp => asl_proto::Protocole::Tcp,
+                ams_config::AslProtocol::Udp => asl_proto::Protocole::Udp,
+            },
+            port: service.port,
+        })
+        .collect();
+    ams_asl::annonce::verifier_les_declarations(&declarations)
+        .map_err(|quoi| format!("annonce ASL : {quoi}"))?;
+
+    let mut annonces = Vec::new();
+    let mut place = vec![0_u8; asl_proto::cadrage::MESSAGE_MAX];
+    for declaration in &declarations {
+        // **AUCUNE ADRESSE LOCALE ANNONCÉE**, et c'est honnête : ce serveur ne
+        // sait pas lesquelles de ses adresses sont joignables du dehors, et les
+        // lire demanderait `getifaddrs`. L'annuaire répondra donc
+        // `derriere_nat: indetermine` — ce qui est juste, il n'a rien mesuré.
+        let combien = ams_asl::composer_une_annonce(machine, declaration, &[], &mut place)
+            .map_err(|quoi| format!("annonce ASL `{}` : {quoi}", declaration.nom))?;
+        annonces.push(place.get(..combien).unwrap_or_default().to_vec());
+    }
+
+    let annuaires = annuaires_asl(&options.asl.directories)?;
+
+    eprintln!(
+        "air-mail-server : annonce ASL — machine {}, {} service(s), {} annuaire(s){}",
+        machine.texte().as_str(),
+        annonces.len(),
+        annuaires.len(),
+        if options.asl.directories.is_empty() {
+            " (les racines embarquées — aucun nom n'est résolu)"
+        } else {
+            ""
+        }
+    );
+    for declaration in &declarations {
+        eprintln!(
+            "air-mail-server :   {} → {}:{}",
+            declaration.nom,
+            declaration.protocole.texte(),
+            declaration.port
+        );
+    }
+    if annonces.is_empty() {
+        eprintln!(
+            "air-mail-server : ATTENTION — la connexion s'ouvrira et RIEN NE SERA ANNONCÉ. \
+             C'est presque toujours un oubli (`config write … --asl-announce \
+             <nom>=<tcp|udp>:<port>`)"
+        );
+    }
+
+    // **LA CADENCE DE DÉPART N'EST QU'UN PLAFOND DE RECUL.** La vraie vient de
+    // l'annuaire, à l'annonce ; celle-ci ne borne que l'attente entre deux
+    // tours avant qu'un annuaire ait parlé.
+    ams_loop_tokio::AttacheAsl::annoncer(annuaires, lue.identite, annonces, 10)
+        .map(Some)
+        .map_err(|erreur| format!("annonce ASL : {erreur}"))
+}
+
+/// Les annuaires à joindre : ceux que la configuration nomme, ou les racines
+/// embarquées.
+///
+/// **AUCUN NOM N'EST RÉSOLU** (C20 du dépôt ASL) : les racines portent leurs
+/// adresses et leurs identités dans la bibliothèque, et un locateur qui n'est
+/// pas une adresse littérale est sauté — c'est un nom.
+fn annuaires_asl(declares: &[String]) -> Result<Vec<ams_loop_tokio::AnnuaireAsl>, String> {
+    let mut annuaires = Vec::new();
+    if declares.is_empty() {
+        for racine in &asl_racines::RACINES {
+            let Some(identite) = racine.identite() else {
+                continue;
+            };
+            for locateur in racine.locateurs {
+                if let Ok(adresse) = locateur.parse() {
+                    annuaires.push(ams_loop_tokio::AnnuaireAsl { adresse, identite });
+                }
+            }
+        }
+        if annuaires.is_empty() {
+            return Err(String::from(
+                "annonce ASL : aucune racine embarquée n'a d'adresse littérale — cette \
+                 version du binaire ne sait joindre aucun annuaire",
+            ));
+        }
+        return Ok(annuaires);
+    }
+
+    for declare in declares {
+        let (hote, identite) = declare.split_once('=').ok_or_else(|| {
+            format!(
+                "annonce ASL : `{declare}` ne dit pas d'identité — la forme est \
+                 `hôte:port=n-…`, et l'identité est la SEULE chose qui soit jugée"
+            )
+        })?;
+        let adresse = hote.parse().map_err(|_| {
+            format!("annonce ASL : `{hote}` n'est pas une adresse — ASL ne résout aucun nom")
+        })?;
+        let identite = asl_id::Identifiant::analyser_genre(asl_id::Genre::Annuaire, identite)
+            .map_err(|_| {
+                format!("annonce ASL : `{identite}` n'est pas l'identifiant d'un annuaire")
+            })?;
+        annuaires.push(ams_loop_tokio::AnnuaireAsl { adresse, identite });
+    }
+    Ok(annuaires)
 }
 
 /// Le registre de réception que la configuration nomme (0.2.44), ouvert — et
