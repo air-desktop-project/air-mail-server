@@ -83,6 +83,7 @@
 /// version x.y.z`, la version du paquet — du semver, tel que Cargo l'exige.
 pub const PRESENTATION: &str = concat!("air-mail-server version ", env!("CARGO_PKG_VERSION"));
 
+mod asl;
 mod certificat;
 mod connection;
 mod delivery;
@@ -114,6 +115,7 @@ mod tlsreports;
 // la session écrit sur le fil est ce que la file a lu dans l'enveloppe, et un
 // type de plus n'ajouterait qu'une occasion de les traduire de travers.
 pub use ams_session::{ClientDsn, ClientReport};
+pub use asl::{Annuaire as AnnuaireAsl, Attache as AttacheAsl, Etat as EtatAsl};
 pub use certificat::Certificat;
 pub use connection::{
     DkimTally, DmarcTally, Outcome, Service, Summary, Timeouts, TlsMode, serve_connection,
