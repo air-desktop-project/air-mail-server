@@ -14,6 +14,14 @@ pub enum Error {
     /// privilèges ici — et le chemin le plus sûr est celui qui n'existe pas.
     RunningAsRoot,
 
+    /// On demande une annonce `air-service-locator` **sans aucun annuaire à
+    /// joindre**.
+    ///
+    /// **CE N'EST PAS UNE PANNE, C'EST UNE CONFIGURATION**, et c'est pourquoi
+    /// elle est rendue au lieu d'être réessayée : une attache sans annuaire
+    /// tournerait en rond en silence, et son porteur croirait qu'elle cherche.
+    AslSansAnnuaire,
+
     /// La configuration annonce une extension que cette boucle ne sait pas
     /// conduire.
     ///
@@ -67,6 +75,10 @@ impl fmt::Display for Error {
             Error::RunningAsRoot => f.write_str(
                 "le serveur refuse de s'exécuter en tant que superutilisateur (C10) ; \
                  les ports privilégiés s'atteignent par une redirection de pare-feu",
+            ),
+            Error::AslSansAnnuaire => f.write_str(
+                "aucun annuaire air-service-locator à joindre : rien ne s'annoncerait, \
+                 et l'attache chercherait en silence",
             ),
             Error::CapabilityNotSupported => f.write_str(
                 "la configuration annonce une extension que cette boucle ne sait pas conduire",

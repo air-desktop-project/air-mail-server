@@ -9,6 +9,20 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# ── S'ANNONCER AUPRÈS D'UN ANNUAIRE `air-service-locator` ───────────────────
+#
+# `asl.rs` tient l'annonce vivante : la connexion EST le bail, et la reprise
+# entre les deux racines est le plan de continuité de la découverte — l'état
+# vivant n'est délibérément pas répliqué de leur côté.
+#
+# La POLITIQUE vient d'`asl-client` (tournée, recul, identité), sans une
+# entrée-sortie ; `ams-quic-dial` porte la connexion, `ams-tls` la confiance,
+# `ams-asl` lit la réponse de l'annuaire.
+ams-asl = { workspace = true }
+ams-quic-dial = { workspace = true }
+asl-client = { workspace = true }
+asl-cle = { workspace = true }
+asl-id = { workspace = true }
 ams-fichier = { workspace = true }
 ams-proto-pop3 = { workspace = true }
 # IMAP (RFC 9051) : le découpage des commandes, que le pilote ne refait pas.
