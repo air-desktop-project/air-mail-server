@@ -161,8 +161,25 @@ unite="$arbre/etc/systemd/system/air-mail-server.service"
 if command -v systemd-analyze > /dev/null 2>&1; then
     # `ExecStart` NOMME LE CHEMIN RÉEL, non celui de l'arbre jetable : systemd se
     # plaint donc que le binaire soit absent, et c'est attendu. Toute AUTRE
-    # plainte est une faute de l'unité.
+    # plainte SUR NOTRE UNITÉ est une faute de l'unité.
+    #
+    # **ET SEULEMENT SUR LA NÔTRE.** `systemd-analyze verify` charge aussi les
+    # unités de la machine, et se plaint des leurs. Sur l'image Ubuntu 26 des
+    # runners GitHub, elle dit — le 2026-10-08, et c'est ce qui a rendu cette
+    # barrière rouge :
+    #
+    #     /usr/lib/systemd/system/walinuxagent.service:21: Support for option
+    #     CPUAccounting= has been removed and it is ignored
+    #
+    # Ce n'est pas notre unité, ce n'est pas notre option, et nous n'avons rien
+    # à y corriger. Le filtre d'hier ne retirait que « is not executable », si
+    # bien que cette barrière ATTRIBUAIT À NOTRE UNITÉ la faute d'une autre —
+    # et envoyait chercher dans le bon fichier une plainte qui n'y était pas.
+    #
+    # Chaque plainte est préfixée du fichier qu'elle concerne : on ne garde donc
+    # que les lignes qui nomment la nôtre.
     autres=$(systemd-analyze verify "$unite" 2>&1 \
+        | grep 'air-mail-server\.service' \
         | grep -v 'is not executable' \
         | grep -v '^$' || true)
     if [ -n "$autres" ]; then
