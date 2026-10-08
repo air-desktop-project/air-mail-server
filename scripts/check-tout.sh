@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# check-tout — les dix barrières, dans l'ordre, sans en oublier une.
+# check-tout — les onze barrières, dans l'ordre, sans en oublier une.
 #
 # # LE DÉFAUT QUE CETTE BARRIÈRE FERME
 #
@@ -70,6 +70,7 @@ cd "$(dirname "$0")/.."
 ORDRE=(
     check-format
     check-etages
+    check-doublons
     check-dco
     check-compile
     check-clippy
