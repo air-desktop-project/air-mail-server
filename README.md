@@ -2598,7 +2598,8 @@ ce que ces contrôles valent honnêtement, et ce qu'ils n'attrapent pas.
 
 ## Construire
 
-La toolchain est épinglée dans `rust-toolchain.toml` (**Rust 1.98.0**, stable).
+La toolchain est épinglée dans `rust-toolchain.toml` (**Rust 1.99.0**, stable —
+la version de référence de tous les projets de la maison depuis le 2026-10-08).
 `rustup` la sélectionne tout seul dans ce répertoire.
 
 ```sh

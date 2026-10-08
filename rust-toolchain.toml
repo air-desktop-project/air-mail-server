@@ -9,9 +9,15 @@
 # Ce projet vise le portage ultérieur vers le stack Air (cf. README, « Portage »).
 # Air épingle un nightly daté parce que sa cible JSON custom l'exige ; ici rien ne
 # l'exige, donc on reste sur stable — la contrainte la plus faible qui suffit.
+#
+# 1.99.0 DEPUIS LE 2026-10-08, et c'est la version de référence de tous les
+# projets (décision de Thierry). Sortie le 1er octobre 2026, elle stabilise les
+# DÉFINITIONS de fonctions variadiques à l'ABI C — jusque-là Rust savait
+# seulement en appeler. Ce dépôt ne s'en sert pas encore ; ce qui compte est
+# qu'il n'y ait pas DEUX versions de référence dans la maison.
 
 [toolchain]
-channel = "1.98.0"
+channel = "1.99.0"
 # `llvm-tools-preview` : exigé par `cargo llvm-cov`, qui outille le 100 % de
 # couverture de C2. Une seule toolchain, donc un seul LLVM : deux versions
 # produiraient des profils que l'autre ne sait pas relire, et la mesure ne

@@ -1,7 +1,7 @@
 # Crate de fuzzing d'air-mail-server (cargo-fuzz). **HORS du workspace**, et pour
 # une raison précise.
 #
-# `cargo-fuzz` exige un nightly. Le workspace, lui, est épinglé sur stable 1.98.0
+# `cargo-fuzz` exige un nightly. Le workspace, lui, est épinglé sur stable 1.99.0
 # en version exacte (cf. `../rust-toolchain.toml`). Deux toolchains dans un même
 # workspace, ce sont deux LLVM — et les profils de couverture que l'un écrit,
 # l'autre ne sait pas les relire. Le gate de C2 ne pourrait plus conclure.

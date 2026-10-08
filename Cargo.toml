@@ -85,7 +85,7 @@ members = [
 
 # `fuzz/` est une crate cargo-fuzz HORS de ce workspace, et pas par commodité :
 # `cargo-fuzz` exige un nightly, tandis que ce workspace est épinglé sur stable
-# 1.98.0 en version exacte. Deux toolchains, ce sont deux LLVM, et les profils de
+# 1.99.0 en version exacte. Deux toolchains, ce sont deux LLVM, et les profils de
 # couverture que l'un écrit, l'autre ne sait pas les relire — le gate de C2 ne
 # pourrait plus conclure. La crate a donc son propre `Cargo.lock`, n'entre ni dans
 # la mesure de couverture ni dans le lock du produit, et rien de ce qu'elle tire
@@ -96,12 +96,12 @@ exclude = ["fuzz"]
 # Version en LOCKSTEP : toutes les crates du workspace la partagent via
 # `version.workspace = true`. Un seul numéro à incrémenter par release, donc
 # aucune dérive possible entre les paquets.
-version = "0.2.58"
+version = "0.2.59"
 edition = "2024"
 # Égale au `channel` de `rust-toolchain.toml`. Les deux doivent bouger ensemble :
 # ce champ fait échouer le build avec un message clair si quelqu'un compile avec
 # une toolchain plus ancienne que celle sur laquelle le projet est vérifié.
-rust-version = "1.98.0"
+rust-version = "1.99.0"
 license = "MPL-2.0"
 authors = ["air-mail-server contributors"]
 repository = "https://github.com/air-desktop-project/air-mail-server"
