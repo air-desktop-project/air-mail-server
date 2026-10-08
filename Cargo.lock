@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "ams-admin"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-admin-options",
  "ams-api",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "ams-admin-options"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-config",
  "ams-guard",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "ams-api"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-proto-http",
  "ams-sasl",
@@ -85,8 +85,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ams-asl"
+version = "0.2.57"
+dependencies = [
+ "asl-client",
+ "asl-id",
+ "asl-proto",
+ "asl-racines",
+]
+
+[[package]]
 name = "ams-attest"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "p256",
  "p384",
@@ -96,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "ams-auth"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-sasl",
  "argon2",
@@ -106,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "ams-config"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-auth",
  "ams-guard",
@@ -120,14 +130,14 @@ dependencies = [
 
 [[package]]
 name = "ams-dane"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "ams-dkim"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ed25519-dalek",
  "rsa",
@@ -136,30 +146,30 @@ dependencies = [
 
 [[package]]
 name = "ams-dmarc"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-dns"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-fichier"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "ams-field-codec"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-guard"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-h3"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-proto-h3",
  "ams-proto-http",
@@ -169,11 +179,11 @@ dependencies = [
 
 [[package]]
 name = "ams-index"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-loop-tokio"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-api",
  "ams-config",
@@ -212,15 +222,15 @@ dependencies = [
 
 [[package]]
 name = "ams-mime"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-mtasts"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-proto-h2"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-field-codec",
  "ams-proto-http",
@@ -228,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "ams-proto-h3"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-field-codec",
  "ams-proto-http",
@@ -237,27 +247,27 @@ dependencies = [
 
 [[package]]
 name = "ams-proto-http"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-proto-imap"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-proto-pop3"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-proto-quic"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-proto-smtp"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-push"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "aes-gcm",
  "hkdf",
@@ -267,11 +277,11 @@ dependencies = [
 
 [[package]]
 name = "ams-queue"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-quic"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-proto-quic",
  "ams-quic-crypto",
@@ -279,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "ams-quic-client"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-proto-h3",
  "ams-proto-quic",
@@ -293,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "ams-quic-crypto"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -306,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "ams-quic-dial"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-api",
  "ams-guard",
@@ -325,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "ams-quic-tls"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-proto-quic",
  "ams-quic",
@@ -336,14 +346,14 @@ dependencies = [
 
 [[package]]
 name = "ams-sasl"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "ams-server"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "aes-gcm",
  "ams-api",
@@ -376,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "ams-session"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-api",
  "ams-mime",
@@ -390,11 +400,11 @@ dependencies = [
 
 [[package]]
 name = "ams-spf"
-version = "0.2.56"
+version = "0.2.57"
 
 [[package]]
 name = "ams-store"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-config",
  "ams-index",
@@ -403,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "ams-tls"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-dane",
  "ams-quic-crypto",
@@ -417,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "ams-tlsrpt"
-version = "0.2.56"
+version = "0.2.57"
 dependencies = [
  "ams-mime",
 ]
@@ -432,6 +442,72 @@ dependencies = [
  "blake2",
  "cpufeatures",
  "password-hash",
+]
+
+[[package]]
+name = "asl-api"
+version = "0.45.0"
+source = "git+https://github.com/air-desktop-project/air-service-locator-server.git?rev=f984ae8#f984ae887429d42c3bc990420138ec6ee804eb20"
+dependencies = [
+ "asl-echo",
+ "asl-id",
+ "asl-proto",
+]
+
+[[package]]
+name = "asl-cle"
+version = "0.45.0"
+source = "git+https://github.com/air-desktop-project/air-service-locator-server.git?rev=f984ae8#f984ae887429d42c3bc990420138ec6ee804eb20"
+dependencies = [
+ "asl-id",
+ "ed25519-dalek",
+ "p256",
+ "sha2",
+]
+
+[[package]]
+name = "asl-client"
+version = "0.27.0"
+source = "git+https://github.com/air-desktop-project/air-service-locator-client.git?rev=7db07a5#7db07a55e45fe477112be1f3313c1a4b813eda97"
+dependencies = [
+ "asl-api",
+ "asl-cle",
+ "asl-echo",
+ "asl-id",
+ "asl-proto",
+ "asl-racines",
+]
+
+[[package]]
+name = "asl-echo"
+version = "0.45.0"
+source = "git+https://github.com/air-desktop-project/air-service-locator-server.git?rev=f984ae8#f984ae887429d42c3bc990420138ec6ee804eb20"
+dependencies = [
+ "asl-cle",
+ "asl-id",
+]
+
+[[package]]
+name = "asl-id"
+version = "0.45.0"
+source = "git+https://github.com/air-desktop-project/air-service-locator-server.git?rev=f984ae8#f984ae887429d42c3bc990420138ec6ee804eb20"
+
+[[package]]
+name = "asl-proto"
+version = "0.45.0"
+source = "git+https://github.com/air-desktop-project/air-service-locator-server.git?rev=f984ae8#f984ae887429d42c3bc990420138ec6ee804eb20"
+dependencies = [
+ "asl-id",
+]
+
+[[package]]
+name = "asl-racines"
+version = "0.45.0"
+source = "git+https://github.com/air-desktop-project/air-service-locator-server.git?rev=f984ae8#f984ae887429d42c3bc990420138ec6ee804eb20"
+dependencies = [
+ "asl-api",
+ "asl-cle",
+ "asl-id",
 ]
 
 [[package]]

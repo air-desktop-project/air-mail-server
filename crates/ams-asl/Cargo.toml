@@ -1,0 +1,25 @@
+[package]
+name = "ams-asl"
+description = "Ce que ce serveur annonce à un annuaire air-service-locator, et ce qu'il lit de sa réponse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# LA GRAMMAIRE ET LA POLITIQUE D'`air-service-locator`, et non notre copie.
+# Les raisons, et le piège des deux révisions, sont en tête du manifeste du
+# workspace.
+#
+# `asl-client` porte la politique — identité, reprise, tournée — et ne fait
+# aucune entrée-sortie : c'est pour cela qu'elle entre à l'étage 2 sans rien
+# y violer. `asl-client-tokio`, qui attend, n'entre nulle part.
+asl-client = { workspace = true }
+asl-id = { workspace = true }
+asl-proto = { workspace = true }
+asl-racines = { workspace = true }
+
+[lints]
+workspace = true

@@ -148,6 +148,7 @@ fuzz_ams_tls_kx tls
 fuzz_ams_tls_quic tls-quic
 fuzz_ams_sasl sasl
 fuzz_ams_spf spf
+fuzz_ams_asl_fiche asl-fiche
 fuzz_ams_spf_eval spf-eval
 fuzz_ams_spf_header spf-header
 fuzz_ams_dns dns
