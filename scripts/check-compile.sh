@@ -92,6 +92,45 @@ if [ "$verrous_faux" -ne 0 ]; then
     exit 1
 fi
 echo "verrous   : Cargo.lock et fuzz/Cargo.lock sont en $version"
+
+# ── ET LES QUATRE PAGES DE MANUEL, POUR LA MÊME RAISON ──────────────────────
+#
+# `check-paquet.sh` le vérifie déjà — mais il EXIGE `dpkg-deb`, qui n'existe
+# pas sur le poste de développement, et s'abstient donc là où le bump se fait.
+# Résultat le 2026-10-08 : sept crans de version de suite, et quatre pages
+# laissées en 0.2.54. La CI l'a dit vingt-cinq minutes plus tard, quatre fois.
+#
+# Ce contrôle-ci ne lit que des fichiers, tourne partout, et répond en une
+# seconde. C'est la doctrine de ce dépôt appliquée à sa propre barrière : ce qui
+# répond vite doit répondre tôt.
+#
+# **IL NE REMPLACE PAS LE 8ter DE `check-paquet`**, et les deux ne mesurent pas
+# la même chose : celui-là compare les pages à la version que le PAQUET déclare,
+# celui-ci à celle que `Cargo.toml` porte. Deux chemins indépendants vers la
+# même égalité valent mieux qu'un.
+pages_fausses=0
+for page in docs/man/air-mail-server.8 docs/man/air-mail-server.8.html \
+            docs/man/air-mail-admin.8 docs/man/air-mail-admin.8.html; do
+    if [ ! -f "$page" ]; then
+        echo "ÉCHEC : \`$page\` manque." >&2
+        pages_fausses=1
+    elif ! grep -q "air-mail-server $version" "$page"; then
+        annonce=$(grep -oE 'air-mail-server [0-9]+\.[0-9]+\.[0-9]+' "$page" | head -1)
+        echo "ÉCHEC : \`$page\` annonce \`${annonce:-rien}\`, \`Cargo.toml\` dit \`$version\`." >&2
+        pages_fausses=1
+    fi
+done
+if [ "$pages_fausses" -ne 0 ]; then
+    echo >&2
+    echo "Une page de manuel qui annonce une autre version que le code est un" >&2
+    echo "inventaire périmé — et c'est `man ./docs/man/…` dans le dépôt qui le" >&2
+    echo "montre, pas le paquet, où \`paquet.sh\` substitue la bonne. Réparez :" >&2
+    echo "    sed -i '' \"s|air-mail-server [0-9.]*|air-mail-server $version|\" \\" >&2
+    echo "        docs/man/air-mail-server.8 docs/man/air-mail-server.8.html \\" >&2
+    echo "        docs/man/air-mail-admin.8 docs/man/air-mail-admin.8.html" >&2
+    exit 1
+fi
+echo "manpages  : les quatre annoncent $version"
 echo
 
 if cargo check --workspace --all-targets --locked; then
