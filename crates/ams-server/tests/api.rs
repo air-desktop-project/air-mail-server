@@ -1193,26 +1193,78 @@ fn un_utilisateur_change_son_propre_mot_de_passe() {
         "le secret d'avant tient toujours"
     );
 
+    // ── ICI, UN `curl` QUI ÉCHOUE EST LE RÉSULTAT ATTENDU ───────────────────
+    //
+    // C'est le SEUL endroit de ce banc où l'échec de `curl` prouve quelque
+    // chose : un pair banni ne reçoit RIEN, pas même un refus — le garde ferme
+    // la connexion sans un mot, et c'est délibéré (répondre apprendrait à qui
+    // frappe qu'il a été vu). `curl` rend alors 35, « unexpected eof while
+    // reading », et un code HTTP vide.
+    //
+    // **CETTE BOUCLE NE PEUT DONC PAS PASSER PAR `changer`**, qui appelle
+    // `reponse_de_curl` : celle-ci PANIQUE sur un `curl` en échec, et elle a
+    // raison partout ailleurs — c'est tout son objet. Les deux exigences sont
+    // contradictoires, et la contradiction a tenu la CI rouge du 2026-10-07 au
+    // 2026-10-08 : `reponse_de_curl` est née ce jour-là pour fermer un trou sur
+    // trente-cinq sites d'appel, et a cassé le seul où l'échec est le but.
+    //
+    // On appelle donc `curl` directement, et l'on distingue les deux issues
+    // plutôt que de les confondre.
+    let essayer_un_faux_secret = |jeton: &str| -> Option<String> {
+        let sortie = std::process::Command::new("curl")
+            .args(["-s", "-S", "--insecure", "--http2", "-X", "PUT"])
+            .args(["-H", &format!("Authorization: Bearer {jeton}")])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-d", r#"{"current_password":"encore-faux","password":"x"}"#])
+            .args(["-o", "/dev/null", "-w", "%{http_code}"])
+            .arg(format!("{base}/v1/me/password"))
+            .output()
+            .expect("curl s'exécute");
+        // `None` : la connexion n'a pas abouti — c'est la signature du ban.
+        sortie
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&sortie.stdout).trim().to_string())
+    };
+
     let seuil = usize::try_from(Thresholds::DEFAULT.invalid_frames_per_minute)
         .expect("le seuil tient dans un usize");
     let mut banni = false;
+    let mut refuses = 0_usize;
     for essai in 0..=seuil.saturating_add(2) {
-        let code = changer(
-            &jeton_neuf,
-            r#"{"current_password":"encore-faux","password":"x"}"#,
-            "/v1/me/password",
-        );
-        // Un pair banni ne reçoit RIEN — pas même un refus. `curl` rend alors
-        // un code vide ou nul, et c'est ce qu'on attend.
-        if code != "403" {
-            banni = true;
-            eprintln!("banni après {essai} essais, dernier code : `{code}`");
-            break;
+        match essayer_un_faux_secret(&jeton_neuf) {
+            // Le refus applicatif : le serveur parle encore.
+            Some(code) if code == "403" => refuses = refuses.saturating_add(1),
+            // Il parle, mais autre chose que `403` : ce n'est NI un refus
+            // attendu NI un ban. On le dit plutôt que de le compter pour l'un
+            // ou pour l'autre.
+            Some(code) => panic!(
+                "au {essai}e essai, le serveur a rendu `{code}` — on attendait `403` \
+                 tant qu'il parle, puis plus rien du tout.\n\
+                 --- ce que le SERVEUR a dit ---\n{}",
+                serveur.journal()
+            ),
+            None => {
+                banni = true;
+                eprintln!("banni après {essai} essais, dont {refuses} refusés par `403`");
+                break;
+            }
         }
     }
     assert!(
         banni,
         "après {seuil} mots de passe faux, le videur doit fermer la porte"
+    );
+    // **ET IL DOIT AVOIR PARLÉ AVANT DE SE TAIRE.** Sans ce contrôle, un
+    // serveur mort dès le premier essai passerait pour un videur efficace — on
+    // conclurait au ban sur une panne, ce qui est exactement l'erreur que
+    // `reponse_de_curl` existe pour empêcher ailleurs.
+    assert!(
+        refuses > 0,
+        "le ban doit SUIVRE des refus applicatifs ; aucun `403` n'a été rendu, \
+         ce qui ressemble à une panne et non à un bannissement.\n\
+         --- ce que le SERVEUR a dit ---\n{}",
+        serveur.journal()
     );
 }
 
