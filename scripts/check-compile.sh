@@ -123,7 +123,8 @@ done
 if [ "$pages_fausses" -ne 0 ]; then
     echo >&2
     echo "Une page de manuel qui annonce une autre version que le code est un" >&2
-    echo "inventaire périmé — et c'est `man ./docs/man/…` dans le dépôt qui le" >&2
+    echo "inventaire périmé — et c'est la lecture directe de la page dans le" >&2
+    echo "dépôt qui le montre, non le paquet, où paquet.sh substitue la bonne." >&2
     echo "montre, pas le paquet, où \`paquet.sh\` substitue la bonne. Réparez :" >&2
     echo "    sed -i '' \"s|air-mail-server [0-9.]*|air-mail-server $version|\" \\" >&2
     echo "        docs/man/air-mail-server.8 docs/man/air-mail-server.8.html \\" >&2

@@ -79,8 +79,20 @@ bash -n scripts/installer.sh || rate "scripts/installer.sh ne s'analyse pas"
 # **CE FICHIER-CI EST ÉCARTÉ DU BALAYAGE**, et c'est inévitable : il PORTE le
 # motif, donc il se signalerait lui-même. La contrepartie est dite plutôt que
 # cachée — un accent grave mal échappé DANS CE SCRIPT ne serait pas vu.
-accents=$(grep -nP '"(?:[^"\\`]|\\.)*`' scripts/*.sh docs/migration/*.sh 2>/dev/null \
-    | grep -vP ':\s*#' \
+# **LE MOTIF EST EN POSIX ÉTENDU, ET NON EN PCRE** — et ce n'était pas un
+# détail de style. Il était écrit en `grep -P` : le `grep` de macOS ne connaît
+# pas cette option, l'erreur partait dans `/dev/null`, le `|| true` rendait une
+# chaîne vide, et CE CONTRÔLE IMPRIMAIT « OK — aucun accent grave » SANS AVOIR
+# RIEN EXAMINÉ. Mesuré le 2026-10-08 : la CI a attrapé un accent grave que ce
+# script venait de déclarer absent sur le poste de développement.
+#
+# C'est la faute que `check-etages` nomme pour lui-même — « un contrôle qui n'a
+# rien examiné n'est pas un contrôle qui passe » —, commise ici. Les deux seules
+# constructions PCRE employées avaient un équivalent POSIX exact : `(?:…)`
+# devient `(…)`, et `\s` devient `[[:space:]]`. Vérifié le même jour avec les
+# deux `grep` — celui de BSD et celui de GNU rendent la même ligne.
+accents=$(grep -nE '"([^"\\`]|\\.)*`' scripts/*.sh docs/migration/*.sh 2>/dev/null \
+    | grep -vE ':[[:space:]]*#' \
     | grep -v '^scripts/check-installation\.sh:' || true)
 # **LE « OK » EST DANS LE `else`**, et ce n'est pas une coquetterie : ce dépôt a
 # déjà imprimé trois fois un « OK » inconditionnel sous un avertissement — dans
