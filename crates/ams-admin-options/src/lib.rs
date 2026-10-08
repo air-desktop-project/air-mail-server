@@ -131,6 +131,22 @@ pub struct Options {
     pub registre: Option<PathBuf>,
     /// `XABOUT` servi et présenté (0.2.45) — vrai par défaut.
     pub about: bool,
+    /// Le répertoire où vit l'identité `air-service-locator` de cette machine.
+    ///
+    /// **ABSENT ÉTEINT TOUT**, comme le relais et comme l'API : on ne s'annonce
+    /// pas, et rien n'est dit à un tiers que l'exploitant n'a pas choisi.
+    pub asl_state: Option<PathBuf>,
+    /// Ce qu'on annonce : un nom par point d'écoute.
+    ///
+    /// Les noms et les ports sont ceux de l'EXPLOITANT, pas ceux des écoutes :
+    /// ce serveur ne connaît pas la redirection qui expose ses ports, et ne peut
+    /// pas la mesurer.
+    pub asl_services: Vec<ams_config::AslService>,
+    /// Les annuaires à joindre, sous la forme `hôte:port=n-…`.
+    ///
+    /// Vide prend les racines embarquées dans la bibliothèque, et aucun nom
+    /// n'est résolu : l'annuaire fonctionne sans DNS.
+    pub asl_directories: Vec<String>,
     /// Où écouter en POP3. Vide : POP3 n'est pas servi.
     pub listen_pop3: Option<SocketAddr>,
     /// Les écoutes POP3, chacune avec son mode TLS.
@@ -314,6 +330,9 @@ impl Default for Options {
             apple_app_id: None,
             apple_development: false,
             registre: None,
+            asl_state: None,
+            asl_services: Vec::new(),
+            asl_directories: Vec::new(),
             about: true,
             // PAS DE POP3 PAR DÉFAUT : un port ouvert qu'on n'a pas demandé est
             // une surface de plus, et celui-ci ne sert personne sans certificat.
@@ -526,6 +545,11 @@ impl Options {
             apple_app_id: self.apple_app_id.clone().unwrap_or_default(),
             apple_development: self.apple_development,
             registre: chemin(self.registre.as_ref()),
+            asl: ams_config::Asl {
+                state: chemin(self.asl_state.as_ref()),
+                services: self.asl_services.clone(),
+                directories: self.asl_directories.clone(),
+            },
             about: self.about,
             tlsrpt: ams_config::Tlsrpt {
                 directory: chemin(self.tlsrpt_dir.as_ref()),
@@ -777,6 +801,44 @@ OPTIONS DE `config write`
                         CONSERVE. Tenu, un message n'est accepté qu'une fois
                         son constat écrit : sinon `451`. Il se lit par
                         `air-mail-admin registre`.
+    --asl-state <répertoire>
+                        OÙ VIT L'IDENTITÉ `air-service-locator` DE CETTE
+                        MACHINE — le fichier `identite`, en 0600, qu'un
+                        enrôlement y a posé. SANS LUI, RIEN NE S'ANNONCE, et
+                        c'est le défaut : un serveur qui s'annoncerait de
+                        lui-même publierait l'existence de ses écoutes à un
+                        tiers que personne n'a choisi. Posé sans fiche
+                        lisible, le serveur REFUSE DE DÉMARRER — annoncer est
+                        un engagement envers des clients qui vont s'y fier.
+                        La machine s'enrôle par `air-mail-admin asl enroll
+                        <code>`, avec un code que l'application affiche.
+    --asl-announce <nom>=<tcp|udp>:<port>
+                        UN SERVICE À ANNONCER, répétable — un nom par point
+                        d'écoute : `air-mail-imaps=tcp:993`.
+                        LE PORT EST CELUI QU'UN CLIENT DOIT JOINDRE, et non
+                        celui que ce serveur a lié. Ce serveur connaît ses
+                        écoutes ; il ne connaît pas la redirection qui les
+                        expose (il ne peut lier aucun port sous 1024), et il ne
+                        peut pas la mesurer. Vous écrivez donc ce qui est
+                        joignable du dehors — et L'ANNUAIRE LE VÉRIFIE : il
+                        sonde chaque point TCP annoncé et rend un verdict. Une
+                        annonce fausse se voit, au lieu de se croire. Un point
+                        UDP ne se sonde pas, et son verdict est `non_sonde`.
+                        Le nom : minuscules, chiffres, `-`, `_`, `.`, ni `-`
+                        ni `.` aux extrémités ; les majuscules sont REFUSÉES,
+                        non repliées. `asl-directory` et `asl-echo` sont
+                        refusés. Deux fois le même nom est refusé : une
+                        réannonce REMPLACE la précédente, et la première
+                        disparaîtrait en silence.
+    --asl-directory <hôte:port>=<n-…>
+                        UN ANNUAIRE À JOINDRE, répétable. SANS AUCUN, ce sont
+                        LES RACINES EMBARQUÉES dans la bibliothèque, par leur
+                        identité et leurs adresses — et aucun nom n'est
+                        résolu : l'annuaire fonctionne sans DNS. L'identité
+                        après le `=` n'est pas un ornement : c'est la SEULE
+                        chose qui soit jugée. L'annuaire présente un
+                        certificat auto-signé, et on le croit si sa clé se
+                        déduit en cet identifiant — sans autorité, sans nom.
     --audit <répertoire>
                         le journal d'audit : un fichier par compte, où
                         s'ajoute ce qui touche à sa sécurité (sessions, refus,
@@ -1462,6 +1524,15 @@ where
             }
             "--audit" => options.audit = Some(PathBuf::from(valeur()?)),
             "--registre" => options.registre = Some(PathBuf::from(valeur()?)),
+            "--asl-state" => options.asl_state = Some(PathBuf::from(valeur()?)),
+            "--asl-announce" => options.asl_services.push(lire_une_annonce(&valeur()?)?),
+            // **AUCUNE VALIDATION ICI, ET C'EST DÉLIBÉRÉ.** La forme
+            // `hôte:port=n-…` se juge en joignant : l'identité attendue est
+            // vérifiée contre la clé que la poignée de main présente, et c'est
+            // la bibliothèque qui le fait. L'analyser ici en ferait une seconde
+            // lecture, qui divergerait le jour où la grammaire des locateurs
+            // bougerait là-bas.
+            "--asl-directory" => options.asl_directories.push(valeur()?),
             "--about" => {
                 options.about = match valeur()?.as_str() {
                     "on" => true,
@@ -1964,6 +2035,32 @@ where
              de déclassement que le cache existe pour fermer",
         ));
     }
+    // ── `asl` : CE QU'ON DÉCLARE SANS POUVOIR LE TENIR ──────────────────────
+    //
+    // Annoncer demande une identité de machine, et elle vit dans le répertoire
+    // d'état. Déclarer des services ou des annuaires sans ce répertoire, c'est
+    // écrire une configuration dont la moitié ne sera jamais employée — et le
+    // serveur démarrerait sans rien annoncer, sans que rien ne le dise.
+    if options.asl_state.is_none()
+        && !(options.asl_services.is_empty() && options.asl_directories.is_empty())
+    {
+        return Err(ArgError::new(
+            "`--asl-announce` et `--asl-directory` demandent `--asl-state <répertoire>` :              sans identité de machine, rien ne s'annonce. Enrôlez-la d'abord —              `air-mail-admin asl enroll <code>`"
+                .to_owned(),
+        ));
+    }
+
+    // **LE JEU ENTIER SE JUGE ICI**, et non annonce par annonce : le doublon de
+    // nom ne se voit que sur l'ensemble, et il ne pardonne pas — une réannonce
+    // du même nom REMPLACE la précédente, si bien que deux déclarations
+    // homonymes feraient disparaître la première en silence.
+    //
+    // La règle vit dans `ams-asl`, avec le protocole. La recopier ici en ferait
+    // deux lectures dont une finirait par mentir.
+    if let Err(quoi) = ams_asl::annonce::verifier_les_declarations(&declarations(&options)) {
+        return Err(ArgError::new(format!("`--asl-announce` : {quoi}")));
+    }
+
     if options.dkim_selector.is_some() != options.dkim_key.is_some() {
         return Err(ArgError::new(
             "`--dkim-selector` et `--dkim-key` vont ENSEMBLE : l'un sans l'autre ne veut dire ni \
@@ -2224,6 +2321,78 @@ fn hote_du_relais(adresse: &str) -> (String, u16) {
     }
 }
 
+/// Lit `<nom>=<protocole>:<port>` — ce qu'une annonce déclare.
+///
+/// # POURQUOI UNE SEULE OPTION, ET NON TROIS
+///
+/// Trois options — un nom, un protocole, un port — devraient se correspondre
+/// par leur ORDRE, et un oubli décalerait tout le reste sans rien dire. Ici, un
+/// service est un mot : `air-mail-imaps=tcp:993`.
+///
+/// # CE QUI EST VÉRIFIÉ ICI, ET CE QUI NE L'EST PAS
+///
+/// La FORME l'est : les deux séparateurs, le protocole parmi deux, le port
+/// numérique et non nul. Le NOM ne l'est pas — son alphabet et les deux noms
+/// réservés appartiennent au protocole, et `verifier_les_declarations` les juge
+/// sur le jeu entier, une fois toutes les options lues.
+fn lire_une_annonce(brute: &str) -> Result<ams_config::AslService, ArgError> {
+    let faute = |quoi: &str| {
+        ArgError::new(format!(
+            "`{brute}` ne dit pas un service : {quoi}. La forme est              `<nom>=<tcp|udp>:<port>`, par exemple `air-mail-imaps=tcp:993`"
+        ))
+    };
+
+    let (nom, point) = brute
+        .split_once('=')
+        .ok_or_else(|| faute("il manque `=`"))?;
+    let (protocole, port) = point
+        .split_once(':')
+        .ok_or_else(|| faute("il manque `:` entre le protocole et le port"))?;
+
+    let protocole = match protocole {
+        "tcp" => ams_config::AslProtocol::Tcp,
+        "udp" => ams_config::AslProtocol::Udp,
+        _ => return Err(faute("le protocole n'est ni `tcp` ni `udp`")),
+    };
+
+    // **ZÉRO EST REFUSÉ ICI, DEVANT L'ADMINISTRATEUR.** Le port zéro n'existe
+    // pas, et l'annuaire refuserait l'annonce — mais il le dirait à un daemon
+    // qui tourne déjà, dans un journal, et non à qui tape la commande.
+    let port: u16 = port
+        .parse()
+        .map_err(|_| faute("le port n'est pas un nombre de 1 à 65535"))?;
+    if port == 0 {
+        return Err(faute("le port zéro n'existe pas"));
+    }
+
+    Ok(ams_config::AslService {
+        name: nom.to_owned(),
+        protocol: protocole,
+        port,
+    })
+}
+
+/// Les déclarations telles que `ams-asl` les juge.
+///
+/// **UNE CONVERSION, ET NON UNE SECONDE REPRÉSENTATION** : `ams_config` porte
+/// la forme qui se range dans le fichier, `ams_asl` celle qui se valide, et
+/// elles emprunteraient l'une à l'autre si l'on tentait de n'en avoir qu'une —
+/// `ams-config` dépendrait du protocole, ou `ams-asl` du format binaire.
+fn declarations(options: &Options) -> std::vec::Vec<ams_asl::Declaration<'_>> {
+    options
+        .asl_services
+        .iter()
+        .map(|service| ams_asl::Declaration {
+            nom: service.name.as_str(),
+            protocole: match service.protocol {
+                ams_config::AslProtocol::Tcp => asl_proto::Protocole::Tcp,
+                ams_config::AslProtocol::Udp => asl_proto::Protocole::Udp,
+            },
+            port: service.port,
+        })
+        .collect()
+}
+
 fn pas_zero<T>(brute: &str, pourquoi: &str) -> Result<T, ArgError>
 where
     T: core::str::FromStr + PartialEq + From<u8>,
@@ -2307,6 +2476,202 @@ mod tests {
         }
     }
 
+    /// Le message d'un refus, pour l'examiner.
+    fn refus(arguments: &[&str]) -> String {
+        match parse(arguments) {
+            Err(quoi) => quoi.message,
+            Ok(autre) => panic!("attendu un refus, obtenu {autre:?}"),
+        }
+    }
+
+    // ── `asl` : s'annoncer ──────────────────────────────────────────────────
+
+    /// **LES HUIT ANNONCES D'USAGE TRAVERSENT LA LIGNE DE COMMANDE.**
+    ///
+    /// Un nom par point d'écoute, et le port est celui qu'un client doit
+    /// joindre — 993, et non le 9993 que ce serveur lie.
+    #[test]
+    fn les_annonces_traversent_la_ligne_de_commande() {
+        let options = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--asl-state",
+            "/var/lib/air-mail/asl",
+            "--asl-announce",
+            "air-mail-smtp=tcp:25",
+            "--asl-announce",
+            "air-mail-imaps=tcp:993",
+            "--asl-announce",
+            "air-mail-api-h3=udp:8443",
+            "--asl-directory",
+            "[2001:db8::1dd4]:6630=n-0PWT8HZD80QMSPPDZ5CQXXYHQC",
+        ]);
+
+        let config = options.en_configuration();
+        assert_eq!(config.asl.state, "/var/lib/air-mail/asl");
+        assert_eq!(config.asl.services.len(), 3);
+        assert_eq!(config.asl.services[1].name, "air-mail-imaps");
+        assert_eq!(config.asl.services[1].port, 993);
+        assert_eq!(
+            config.asl.services[1].protocol,
+            ams_config::AslProtocol::Tcp
+        );
+        assert_eq!(
+            config.asl.services[2].protocol,
+            ams_config::AslProtocol::Udp,
+            "le `udp` doit traverser : son verdict sera `non_sonde`, et ce n'est \
+             pas une panne"
+        );
+        assert_eq!(config.asl.directories.len(), 1);
+    }
+
+    /// **SANS RIEN DIRE, ON NE S'ANNONCE PAS.**
+    ///
+    /// C'est le défaut, et c'est ce qu'un fichier écrit avant ce groupe décode.
+    #[test]
+    fn sans_rien_dire_on_ne_s_annonce_pas() {
+        let config = ecrire(&["--domain", "mail.example.com"]).en_configuration();
+        assert!(config.asl.state.is_empty(), "éteint");
+        assert!(config.asl.services.is_empty());
+        assert!(config.asl.directories.is_empty());
+    }
+
+    /// **DÉCLARER SANS IDENTITÉ EST REFUSÉ, ET LE REFUS DIT QUOI FAIRE.**
+    ///
+    /// Sans répertoire d'état, il n'y a pas d'identité de machine, donc rien ne
+    /// s'annoncerait — et le serveur démarrerait en ignorant la moitié de sa
+    /// configuration, sans que rien ne le dise.
+    #[test]
+    fn declarer_sans_identite_est_refuse() {
+        for argument in ["--asl-announce", "--asl-directory"] {
+            let dit = refus(&[
+                "--domain",
+                "mail.example.com",
+                argument,
+                if argument == "--asl-announce" {
+                    "air-mail-smtp=tcp:25"
+                } else {
+                    "192.0.2.1:6630=n-0PWT8HZD80QMSPPDZ5CQXXYHQC"
+                },
+            ]);
+            assert!(dit.contains("--asl-state"), "sur `{argument}` : {dit}");
+            assert!(
+                dit.contains("asl enroll"),
+                "le refus dit quoi faire : {dit}"
+            );
+        }
+    }
+
+    /// **CINQ FAÇONS D'ÉCRIRE UNE ANNONCE QUI N'EN EST PAS UNE.**
+    ///
+    /// Chacune se refuse devant l'administrateur, et non dans le journal d'un
+    /// daemon qui tourne déjà.
+    #[test]
+    fn les_cinq_formes_fautives_d_une_annonce() {
+        let cas = [
+            ("air-mail-smtp", "il manque `=`"),
+            ("air-mail-smtp=tcp", "il manque `:`"),
+            ("air-mail-smtp=sctp:25", "ni `tcp` ni `udp`"),
+            ("air-mail-smtp=tcp:vingt-cinq", "n'est pas un nombre"),
+            ("air-mail-smtp=tcp:0", "le port zéro n'existe pas"),
+        ];
+        for (brute, attendu) in cas {
+            let dit = refus(&[
+                "--domain",
+                "mail.example.com",
+                "--asl-state",
+                "/var/lib/air-mail/asl",
+                "--asl-announce",
+                brute,
+            ]);
+            assert!(dit.contains(attendu), "sur `{brute}` : {dit}");
+            assert!(
+                dit.contains("air-mail-imaps=tcp:993"),
+                "le refus montre la forme attendue : {dit}"
+            );
+        }
+    }
+
+    /// **LA GRAMMAIRE DES NOMS EST CELLE DU PROTOCOLE, PAS LA NÔTRE.**
+    ///
+    /// Trois refus, et aucun n'est écrit ici : `ams-asl` les porte, avec le
+    /// protocole. Ce qui est éprouvé ici est que la ligne de commande les
+    /// oppose — devant l'administrateur, et non à la première annonce.
+    #[test]
+    fn la_ligne_de_commande_oppose_la_grammaire_du_protocole() {
+        let cas = [
+            ("Air-Mail-SMTP=tcp:25", "pas admis"),
+            ("asl-echo=udp:6634", "réservé"),
+            ("asl-directory=tcp:6630", "réservé"),
+        ];
+        for (brute, attendu) in cas {
+            let dit = refus(&[
+                "--domain",
+                "mail.example.com",
+                "--asl-state",
+                "/var/lib/air-mail/asl",
+                "--asl-announce",
+                brute,
+            ]);
+            assert!(dit.contains("--asl-announce"), "sur `{brute}` : {dit}");
+            assert!(dit.contains(attendu), "sur `{brute}` : {dit}");
+        }
+    }
+
+    /// **DEUX FOIS LE MÊME NOM EST REFUSÉ.**
+    ///
+    /// Une réannonce du même nom REMPLACE la précédente : l'exploitant croirait
+    /// avoir annoncé deux services, et l'annuaire n'en publierait qu'un.
+    #[test]
+    fn deux_annonces_du_meme_nom_sont_refusees() {
+        let dit = refus(&[
+            "--domain",
+            "mail.example.com",
+            "--asl-state",
+            "/var/lib/air-mail/asl",
+            "--asl-announce",
+            "air-mail-imaps=tcp:993",
+            "--asl-announce",
+            "air-mail-imaps=tcp:9993",
+        ]);
+        assert!(dit.contains("même nom"), "{dit}");
+    }
+
+    /// **LES TROIS OPTIONS `asl` SANS VALEUR SE REFUSENT.**
+    ///
+    /// Ce n'est pas la même faute qu'une valeur illisible : la première dit
+    /// « je n'ai pas su lire », celle-ci « il manque un mot ». Les confondre
+    /// enverrait relire ce qui n'a pas été écrit.
+    #[test]
+    fn les_options_asl_sans_valeur_se_refusent() {
+        for option in ["--asl-state", "--asl-announce", "--asl-directory"] {
+            assert!(parse([option]).is_err(), "{option} sans valeur");
+            // Sous forme de TRANCHE aussi : `parse` est générique, et c'est
+            // cette instanciation-là que le binaire emploie.
+            let seule: &[&str] = &[option];
+            assert!(parse(seule).is_err(), "{option} sans valeur, en tranche");
+        }
+    }
+
+    /// **UN RÉPERTOIRE D'ÉTAT SEUL EST RECEVABLE.**
+    ///
+    /// Une machine peut vouloir une connexion authentifiée pour être joignable
+    /// par l'annuaire, sans rien annoncer elle-même. Le serveur le DIT au
+    /// démarrage, parce que c'est presque toujours un oubli — mais ce n'est pas
+    /// une faute de configuration.
+    #[test]
+    fn un_repertoire_d_etat_seul_est_recevable() {
+        let config = ecrire(&[
+            "--domain",
+            "mail.example.com",
+            "--asl-state",
+            "/var/lib/air-mail/asl",
+        ])
+        .en_configuration();
+        assert_eq!(config.asl.state, "/var/lib/air-mail/asl");
+        assert!(config.asl.services.is_empty());
+    }
+
     /// **CE `panic!` N'EST PAS DÉCORATIF**, et c'est pourquoi il est éprouvé.
     ///
     /// Un essai qui demanderait l'aide en croyant écrire une configuration
@@ -2316,6 +2681,16 @@ mod tests {
     #[should_panic(expected = "attendu `Ecrire`")]
     fn le_secours_des_essais_refuse_une_demande_qui_n_ecrit_pas() {
         let _ = ecrire(&["--help"]);
+    }
+
+    /// **ET CELUI DE `refus` NON PLUS**, pour la raison symétrique : un essai
+    /// qui croirait examiner un message de refus examinerait une ligne de
+    /// commande ACCEPTÉE, et conclurait que le refus ne dit pas ce qu'il faut —
+    /// alors qu'il n'y a pas eu de refus du tout.
+    #[test]
+    #[should_panic(expected = "attendu un refus")]
+    fn le_secours_des_refus_refuse_une_ligne_recevable() {
+        let _ = refus(&["--domain", "mail.example.com"]);
     }
 
     #[test]

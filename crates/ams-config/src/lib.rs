@@ -182,9 +182,9 @@ mod scram;
 pub use accounts::{decode_accounts, encode_accounts};
 pub use app_passwords::{APP_NOM_OCTETS_MAX, decode_app_passwords, encode_app_passwords};
 pub use codec::{
-    ANDROID_REVOCATION_MAX_DAYS, AttestationMode, Configuration, Dkim, Dmarc, Enforcement, Error,
-    Listener, Mtasts, Queue, Relay, Spf, TRAVERSAL_LIMIT_WORDS, Timeouts, Tls, Tlsrpt, decode,
-    encode,
+    ANDROID_REVOCATION_MAX_DAYS, Asl, AslProtocol, AslService, AttestationMode, Configuration,
+    Dkim, Dmarc, Enforcement, Error, Listener, Mtasts, Queue, Relay, Spf, TRAVERSAL_LIMIT_WORDS,
+    Timeouts, Tls, Tlsrpt, decode, encode,
 };
 pub use delegations::{Delegation, Rights, decode_delegations, encode_delegations};
 pub use devices::{

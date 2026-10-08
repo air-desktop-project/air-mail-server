@@ -9,6 +9,15 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# LA GRAMMAIRE DES ANNONCES, ET NON SA COPIE. L'alphabet d'un nom de service et
+# les deux noms réservés appartiennent au protocole `air-service-locator` ; les
+# recopier ici en ferait deux lectures, dont une finirait par mentir. Cette
+# crate refuse donc à la ligne de commande ce que l'annuaire refuserait au
+# premier message — devant l'administrateur, et non dans un journal.
+ams-asl = { workspace = true }
+# `asl-proto` POUR UN SEUL TYPE : le protocole d'un point, que `ams-asl` attend
+# dans ses déclarations. Rien de neuf dans le graphe — `ams-asl` le tire déjà.
+asl-proto = { workspace = true }
 ams-config = { workspace = true }
 ams-guard = { workspace = true }
 ams-proto-imap = { workspace = true }

@@ -284,6 +284,15 @@ struct Configuration {
   # personne quel logiciel il est.
   aboutOff @57 :Bool;
 
+  # S'ANNONCER AUPRÈS D'UN ANNUAIRE `air-service-locator` (0.2.57).
+  #
+  # **UN FICHIER ÉCRIT AVANT CE CHAMP DÉCODE UN RÉPERTOIRE D'ÉTAT VIDE**, et un
+  # répertoire vide veut dire « on ne s'annonce pas ». Une configuration
+  # existante se comporte donc exactement comme avant : éteint, comme le relais
+  # et comme l'API. Un serveur qui s'annoncerait de lui-même publierait
+  # l'existence de ses écoutes à un tiers que son exploitant n'a pas choisi.
+  asl @58 :Asl;
+
   enum AttestationMode {
     off @0;
     verify @1;
@@ -393,6 +402,85 @@ struct Configuration {
 }
 
 # Une écoute, et le mode TLS de ce port.
+# S'ANNONCER AUPRÈS D'UN ANNUAIRE `air-service-locator`.
+#
+# # LE PROBLÈME, VU D'ICI
+#
+# Ce serveur ne lie pas les ports que ses clients attendent : il n'a aucune
+# capacité de se lier sous 1024, et c'est une redirection du pare-feu qui expose
+# 25, 587, 465, 993. Un client qui ne connaît que le nom de la machine ne sait
+# pas où frapper, et l'exploitant est seul à détenir la correspondance.
+#
+# L'annuaire renverse la question : le serveur ANNONCE où le joindre, ses
+# clients DEMANDENT.
+struct Asl {
+  # Le répertoire où vit l'identité de cette machine — le fichier `identite`,
+  # en 0600, qu'`asl enroll` ou `air-mail-admin asl enroll` y a posé.
+  #
+  # **VIDE ÉTEINT TOUT**, et c'est le défaut. Non vide sans fiche lisible : le
+  # serveur refuse de démarrer. Annoncer est un engagement envers des clients
+  # qui vont s'y fier ; démarrer en silence sans pouvoir le tenir serait pire
+  # que de ne pas démarrer.
+  state @0 :Text;
+
+  # CE QU'ON ANNONCE : un nom par point d'écoute.
+  #
+  # Vide avec un `state` posé : le serveur ouvre quand même sa connexion — une
+  # machine peut vouloir être joignable par l'annuaire sans rien annoncer — mais
+  # il le DIT au démarrage, parce que c'est presque toujours un oubli.
+  services @1 :List(AslService);
+
+  # LES ANNUAIRES À JOINDRE, s'il ne faut pas joindre les racines.
+  #
+  # **VIDE PREND LES RACINES EMBARQUÉES**, et c'est le cas normal : leur
+  # identité et leurs adresses vivent dans la bibliothèque, et AUCUN NOM N'EST
+  # RÉSOLU — l'annuaire fonctionne sans DNS (contrainte C20 du dépôt ASL).
+  #
+  # La forme est celle d'`asl --directory` : `hôte:port=n-…`. L'identité après
+  # le `=` n'est pas un ornement — c'est la SEULE chose qui soit jugée : la
+  # racine présente un certificat auto-signé, et on la croit si sa clé se déduit
+  # en l'identifiant attendu, sans autorité ni nom. Un `hôte:port` seul est
+  # refusé.
+  directories @2 :List(Text);
+}
+
+# UN SERVICE ANNONCÉ : un nom, un protocole, un port.
+struct AslService {
+  # Le nom sous lequel les clients le chercheront : minuscules ASCII, chiffres,
+  # `-`, `_`, `.`, et rien d'autre — ce nom voyage dans une URL. Ni `-` ni `.`
+  # aux extrémités. Les majuscules sont REFUSÉES et non repliées : deux noms qui
+  # ne diffèrent que par la casse feraient deux services que l'annuaire
+  # distingue et qu'un humain lit comme un seul.
+  #
+  # `asl-directory` et `asl-echo` sont refusés : le premier est réservé par le
+  # protocole, le second ferait conclure « injoignable » à tout qui sonde cette
+  # machine.
+  name @0 :Text;
+
+  # TCP ou UDP. **UDP NE SE SONDE PAS** : une sonde n'y distingue pas « écoute
+  # et ignore » de « rien n'écoute », et son verdict sera donc `non_sonde`. Ce
+  # n'est pas une panne.
+  protocol @1 :AslProtocol;
+
+  # LE PORT QU'UN CLIENT DOIT JOINDRE, et non celui que ce serveur a lié.
+  #
+  # C'est la décision qui gouverne ce groupe (Thierry, 2026-10-08). Ce serveur
+  # connaît ses propres écoutes ; il ne connaît pas la redirection qui les
+  # expose, et il ne peut pas la mesurer. Annoncer ce qu'il a lié affirmerait
+  # que 9993 est ce qu'un client doit joindre — vrai par accident, faux en
+  # principe.
+  #
+  # L'exploitant écrit donc ce qui est joignable du dehors, puisque lui seul le
+  # sait, et **l'annuaire le vérifie** : il sonde chaque point TCP annoncé et
+  # rend un verdict. Une annonce fausse se voit, au lieu de se croire.
+  port @2 :UInt16;
+}
+
+enum AslProtocol {
+  tcp @0;
+  udp @1;
+}
+
 struct Listener {
   # « adresse:port ».
   address @0 :Text;

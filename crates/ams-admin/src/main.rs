@@ -1508,6 +1508,56 @@ fn afficher(config: &Configuration) {
             )
         }
     );
+    // ── S'ANNONCER (0.2.57) ─────────────────────────────────────────────────
+    //
+    // **TROIS LIGNES, ET NON UNE.** Un répertoire d'état sans service annoncé
+    // est presque toujours un oubli, et le dire sur la même ligne que le
+    // répertoire le ferait lire comme un détail. L'annuaire, lui, se dit à part
+    // parce que « les racines embarquées » est un choix que personne n'a écrit.
+    println!(
+        "annonce ASL        {}",
+        if config.asl.state.is_empty() {
+            String::from("ÉTEINTE — ce serveur ne dit à aucun annuaire où le joindre")
+        } else {
+            format!(
+                "identité sous `{}` (le fichier `identite`, en 0600)",
+                config.asl.state
+            )
+        }
+    );
+    if !config.asl.state.is_empty() {
+        println!(
+            "  services         {}",
+            if config.asl.services.is_empty() {
+                String::from(
+                    "AUCUN — la connexion s'ouvre, et rien n'est annoncé ;                      c'est presque toujours un oubli",
+                )
+            } else {
+                config
+                    .asl
+                    .services
+                    .iter()
+                    .map(|service| {
+                        format!(
+                            "{} → {}:{}",
+                            service.name,
+                            service.protocol.name(),
+                            service.port
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+        println!(
+            "  annuaires        {}",
+            if config.asl.directories.is_empty() {
+                String::from("les RACINES EMBARQUÉES — aucun nom n'est résolu, ASL ignore le DNS")
+            } else {
+                config.asl.directories.join(", ")
+            }
+        );
+    }
     println!(
         "journal d'audit    {}",
         if config.audit.is_empty() {
