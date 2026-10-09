@@ -30,17 +30,25 @@
 //! annonce** — huit noms, un point d'écoute chacun — et la fiche où vit
 //! l'identité de la machine.
 //!
-//! # LES PORTS ANNONCÉS VIENNENT DE LA CONFIGURATION, JAMAIS DES ÉCOUTES
+//! # ON ANNONCE LE PORT RÉELLEMENT ÉCOUTÉ, JAMAIS UNE CONVENTION
 //!
-//! C'est la décision qui gouverne tout ce module (Thierry, 2026-10-08). Ce
-//! serveur connaît les ports qu'il a LIÉS ; il ne connaît pas la redirection
-//! qui les expose, et il ne peut pas la mesurer. Annoncer ce qu'il a lié
-//! affirmerait que 9993 est ce qu'un client doit joindre, ce qui est vrai par
-//! accident et faux en principe.
+//! C'est la décision qui gouverne tout ce module (Thierry, 2026-10-09), et
+//! elle corrige la précédente, qui disait le contraire. **Le rôle d'ASL est
+//! justement de refuser les conventions de ports.** Un annuaire existe pour
+//! qu'un daemon n'ait plus à être lancé en `root` pour avoir le droit de lier
+//! un port entre 0 et 1024 : il prend le port qu'il veut, puis le fait
+//! connaître. Un client distant qui résout par ASL obtient l'adresse de la
+//! machine **et le vrai numéro de port où il y a écoute**.
 //!
-//! L'exploitant écrit donc ce qui est joignable du dehors, puisque lui seul le
-//! sait — et **l'annuaire le vérifie** : il sonde chaque point TCP annoncé et
-//! rend un verdict. Une annonce fausse se voit, au lieu de se croire.
+//! Annoncer 993 quand ce serveur écoute sur 9993 reviendrait donc à publier la
+//! convention que l'annuaire remplace — et à faire dépendre l'annonce d'une
+//! redirection `nftables` dont ASL rend l'existence inutile. La redirection
+//! reste, mais pour les clients qui ne savent QUE les conventions : tout MTA de
+//! l'Internet, tout logiciel de messagerie. Elle n'est pas ce qu'ASL publie.
+//!
+//! Et c'est ce qui rend le sondage de l'annuaire utile : il sonde chaque point
+//! TCP annoncé, donc il mesure l'écoute elle-même, et non la redirection qui la
+//! masque.
 //!
 //! # ET RIEN N'EST ANNONCÉ PAR DÉFAUT
 //!

@@ -511,12 +511,14 @@ pub struct Configuration {
 
 /// S'annoncer auprès d'un annuaire `air-service-locator`.
 ///
-/// # CE QUI EST ANNONCÉ VIENT D'ICI, ET NON DES ÉCOUTES
+/// # CE QUI EST ANNONCÉ EST LE PORT ÉCOUTÉ, ET NON UNE CONVENTION
 ///
-/// Ce serveur connaît les ports qu'il a liés ; il ne connaît pas la redirection
-/// qui les expose, et il ne peut pas la mesurer (C6). L'exploitant écrit donc
-/// ce qui est joignable du dehors, et **l'annuaire le vérifie** : il sonde
-/// chaque point TCP annoncé et rend un verdict.
+/// La configuration NOMME les services ; le port qu'elle porte est celui où ce
+/// serveur écoute vraiment. ASL existe pour affranchir un daemon des ports
+/// privilégiés — il écoute où il veut, l'annuaire dit où —, si bien
+/// qu'annoncer 993 pour une écoute sur 9993 publierait la convention que
+/// l'annuaire remplace. L'annuaire sonde chaque point TCP annoncé : avec le
+/// vrai port, son verdict porte sur l'écoute elle-même.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Asl {
     /// Le répertoire où vit l'identité de cette machine.
@@ -526,7 +528,7 @@ pub struct Asl {
     /// fier, et démarrer sans pouvoir le tenir serait pire que de ne pas
     /// démarrer.
     pub state: String,
-    /// Ce qu'on annonce : un nom par point d'écoute.
+    /// Ce qu'on annonce : un nom, et le port RÉELLEMENT écouté.
     pub services: Vec<AslService>,
     /// Les annuaires à joindre, sous la forme `hôte:port=n-…`.
     ///

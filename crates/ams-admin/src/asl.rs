@@ -423,7 +423,7 @@ fn dire(
     }
     dit.push_str(
         "\n\nRIEN N'EST ENCORE ANNONCÉ. Déclarez ce que les clients doivent joindre :\n    \
-         air-mail-admin config write … --asl-announce air-mail-imaps=tcp:993",
+         air-mail-admin config write … --asl-announce air-mail-imaps=tcp:9993",
     );
     dit
 }

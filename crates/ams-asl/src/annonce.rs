@@ -53,11 +53,16 @@ pub const SERVICES_MAX: usize = 16;
 
 /// Ce que l'exploitant déclare : un nom, un protocole, un port.
 ///
-/// # LE PORT EST CELUI QU'UN CLIENT DOIT JOINDRE
+/// # LE PORT EST CELUI QUE CE SERVEUR ÉCOUTE VRAIMENT
 ///
-/// Pas celui que ce serveur a lié. Il n'y a aucune façon pour ce serveur de
-/// deviner la redirection qui les sépare, et l'annuaire **sonde** ce qui est
-/// annoncé : une déclaration fausse se voit dans son verdict.
+/// Pas la convention qu'une redirection expose. ASL existe pour qu'un daemon
+/// n'ait plus besoin des ports privilégiés : il écoute où il veut, et
+/// l'annuaire dit où. Publier 993 pour une écoute sur 9993 renverrait le
+/// client vers la redirection qu'ASL rend inutile.
+///
+/// L'annuaire **sonde** ce qui est annoncé, et c'est pour cela que le port doit
+/// être le vrai : son verdict porte alors sur l'écoute, et non sur un
+/// `nftables` qui la masque.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Declaration<'a> {
     /// Le nom sous lequel les clients le chercheront.
@@ -65,7 +70,7 @@ pub struct Declaration<'a> {
     /// TCP ou UDP. **UDP ne se sonde pas** (`modele.md` §4.3) : son verdict
     /// sera `non_sonde`, et ce n'est pas une panne.
     pub protocole: Protocole,
-    /// Le port joignable du dehors.
+    /// Le port où ce serveur écoute pour de bon.
     pub port: u16,
 }
 
