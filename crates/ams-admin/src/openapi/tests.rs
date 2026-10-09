@@ -171,24 +171,36 @@ fn seules_les_portes_d_entree_n_exigent_rien() {
     }
 }
 
-/// Les portes d'entrée sont les quatre qu'on croit.
+/// **CE QUI N'EXIGE AUCUN JETON, ET RIEN D'AUTRE.**
 ///
-/// Si une cinquième apparaissait, ou si l'une de ces quatre se mettait à exiger
-/// un jeton, c'est ici qu'on l'apprendrait.
+/// # QUATRE PORTES, ET UNE DESCRIPTION
+///
+/// Les quatre portes sont celles où l'on n'a encore rien : on y échange des
+/// identifiants, on y demande un défi, on y présente un défi signé, on y enrôle
+/// une clef sur la foi d'une invitation.
+///
+/// La cinquième n'est pas une porte, c'est `/v1/openapi.json` — **découvrir
+/// n'est pas utiliser**. Elle y figure parce que ce qu'elle publie est déjà
+/// énumérable sans jeton, et non par commodité.
+///
+/// Si une sixième apparaissait, ou si l'une de ces cinq se mettait à exiger un
+/// jeton, c'est ici qu'on l'apprendrait. **C'EST LA LISTE LA PLUS SENSIBLE DE
+/// CETTE API** : tout ce qui y entre est servi à un inconnu.
 #[test]
-fn les_portes_d_entree_sont_au_nombre_de_quatre() {
-    let portes: Vec<&str> = CATALOGUE
+fn ce_qui_n_exige_aucun_jeton() {
+    let sans_jeton: Vec<&str> = CATALOGUE
         .iter()
         .filter(|entree| entree.exemplaire.scope(Method::Post).is_none())
         .map(|entree| entree.gabarit)
         .collect();
     assert_eq!(
-        portes,
+        sans_jeton,
         [
             "/v1/tokens",
             "/v1/sessions/challenge",
             "/v1/sessions",
-            "/v1/devices"
+            "/v1/devices",
+            "/v1/openapi.json",
         ]
     );
 }

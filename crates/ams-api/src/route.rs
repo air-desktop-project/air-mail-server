@@ -376,6 +376,33 @@ pub enum Resource<'o> {
 
     /// `/v1/health` — le serveur répond-il ?
     Health,
+    /// `/v1/openapi.json` — **ce que cette API fait**, et non ce qu'elle a.
+    ///
+    /// # DÉCOUVRIR N'EST PAS UTILISER, ET CELLE-CI N'EXIGE DONC RIEN
+    ///
+    /// Un document OpenAPI décrit l'API comme un PRODUIT : les mêmes chemins
+    /// pour tout appelant, à toute heure, quelle que soit l'installation. Il ne
+    /// nomme aucun compte, aucune boîte, aucun domaine, aucun réglage — il est à
+    /// cette API ce qu'une page de manuel est à une commande.
+    ///
+    /// **ET CE QU'IL PUBLIE EST DÉJÀ PUBLIC.** Mesuré : sans jeton, un chemin
+    /// qui existe rend `401` et un chemin inventé rend `404`. La surface des
+    /// routes s'énumère donc en une boucle, par n'importe qui. Exiger un jeton
+    /// ici n'aurait caché que la commodité.
+    ///
+    /// # CE QU'ELLE COÛTE, ET CE QUI LE BORNE
+    ///
+    /// Deux cent dix kibioctets rendus sans vérifier de jeton, ce serait un
+    /// robinet. Deux choses le ferment : le garde (C8) compte cette requête
+    /// comme toute autre — les seuils par source s'y appliquent —, et un `ETag`
+    /// fait qu'une relecture coûte un `304` de quelques octets.
+    ///
+    /// **L'`ETag` EST LA VERSION DU SERVEUR**, et c'est exact plutôt que
+    /// commode : le document porte `info.version`, donc deux versions égales
+    /// décrivent le même document, et `check-compile` exige déjà que les pages
+    /// de manuel et le code annoncent la même.
+    OpenApi,
+
     /// `/v1/metrics` — les compteurs.
     Metrics,
 }
@@ -402,6 +429,10 @@ impl Resource<'_> {
             Self::Tokens | Self::Devices | Self::SessionChallenge | Self::Sessions => {
                 return None;
             }
+            // **NI CELLE-CI**, pour une autre raison : ce n'est pas une porte,
+            // c'est une description. Découvrir n'est pas utiliser, et ce qu'elle
+            // publie est déjà énumérable sans jeton.
+            Self::OpenApi => return None,
             // Révoquer son propre jeton ne demande que de l'avoir.
             Self::CurrentToken
             | Self::OwnPassword
@@ -485,9 +516,12 @@ impl Resource<'_> {
             // **ELLE NE S'ÉCRIT PAS** : le journal se déduit de la boîte, il ne
             // se pose pas.
             Self::Changes { .. } => &[Method::Get, Method::Head],
-            Self::Mailboxes | Self::Domains | Self::Bans | Self::Health | Self::Metrics => {
-                &[Method::Get, Method::Head]
-            }
+            Self::Mailboxes
+            | Self::Domains
+            | Self::Bans
+            | Self::Health
+            | Self::Metrics
+            | Self::OpenApi => &[Method::Get, Method::Head],
             Self::Mailbox { .. } => &[Method::Get, Method::Head, Method::Put, Method::Delete],
             Self::Messages { .. } => &[Method::Get, Method::Head, Method::Post],
             Self::Message { .. } => &[Method::Get, Method::Head, Method::Patch, Method::Delete],
@@ -686,6 +720,7 @@ impl Resource<'_> {
             Self::Ban { .. } => 42,
             Self::Health => 43,
             Self::Metrics => 44,
+            Self::OpenApi => 45,
         }
     }
 }
@@ -870,6 +905,7 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
         }),
         ("health", 2) => Ok(Resource::Health),
         ("metrics", 2) => Ok(Resource::Metrics),
+        ("openapi.json", 2) => Ok(Resource::OpenApi),
         _ => Err(manque),
     }
 }

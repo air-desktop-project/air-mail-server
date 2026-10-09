@@ -570,6 +570,38 @@ impl Http {
             Err(faute) => return Err((faute.reason(), place_de_la_reponse)),
         };
 
+        // 4 ter. **`OPTIONS` SE RÉPOND SANS JETON, ET C'EST MESURÉ.**
+        //
+        //    Elle l'exigeait, au motif que son `Allow` dirait à un inconnu
+        //    quelles méthodes existent sur un chemin. Deux mesures ont montré que
+        //    ce refus ne protégeait rien, et les deux sont figées en essais :
+        //
+        //      — `Resource::allowed` est un `match` sur la VARIANTE et ne
+        //        consulte aucun magasin : deux objets, l'un plausible et l'autre
+        //        absurde, obtiennent le même `Allow`. Cette réponse ne dit donc
+        //        rien de l'objet, seulement du GABARIT ;
+        //      — et les gabarits sont DÉJÀ publics : sans jeton, un chemin qui
+        //        existe rend `401` et un chemin inventé rend `404`, pour tout
+        //        verbe. La surface des routes s'énumère en une boucle, et le
+        //        document OpenAPI la publie désormais de toute façon.
+        //
+        //    **DÉCOUVRIR N'EST PAS UTILISER.** `OPTIONS` demande ce que l'API
+        //    fait ; tout le reste lui demande de faire quelque chose. Exiger un
+        //    jeton pour la première interdisait la découverte normalisée et
+        //    cassait le sondage préalable de CORS — en échange d'un secret qui
+        //    n'en était pas un.
+        //
+        //    Ce qui reste caché l'est toujours : l'existence d'un OBJET.
+        //    `/v1/accounts/<n'importe quoi>` rend `401` que le compte existe ou
+        //    non, et cette réponse-ci n'y touche pas.
+        if matches!(resolu.method, Method::Options) {
+            return Ok(methodes_servies(
+                self.alt_svc(),
+                resolu.resource,
+                place_de_la_reponse,
+            ));
+        }
+
         // 5. L'AUTORISATION, ET ELLE PASSE AVANT TOUT CE QUI DÉPEND DE LA
         //    RESSOURCE. Un `405` nomme la ressource et énumère ses méthodes ; un
         //    `400` sur le type d'un corps dit qu'on a reconnu le chemin. Les
@@ -589,17 +621,10 @@ impl Http {
                     place_de_la_reponse,
                 ));
             }
-            // **`OPTIONS` SE RÉPOND AVANT L'ÉCHANGE**, et il faut le dire ici
-            // aussi : sans cela, elle descendait dans la porte d'entrée, qui
-            // cherchait des identifiants dans un corps qu'`OPTIONS` n'a pas, et
-            // rendait 401. Une porte publique qui refuse de dire ce qu'elle
-            // sert n'aurait aucun secret à garder — son existence est connue.
-            if matches!(resolu.method, Method::Options) {
-                return Ok(methodes_servies(
-                    self.alt_svc(),
-                    resolu.resource,
-                    place_de_la_reponse,
-                ));
+            // **LE DOCUMENT SE REND ICI**, avant tout ce qui cherche des
+            // identifiants dans un corps : il n'en a pas, et il n'en veut pas.
+            if matches!(resolu.resource, Resource::OpenApi) {
+                return Ok(le_document(self.alt_svc(), tete, place_de_la_reponse));
             }
             // **LE TYPE DU CORPS SE VÉRIFIE ICI AUSSI**, et il n'y a rien à
             // cacher en le faisant : cette ressource-ci est la porte publique,
@@ -649,18 +674,6 @@ impl Http {
         // 6. Le verbe, maintenant qu'on a le droit d'apprendre qu'il ne va pas.
         if !resolu.serves {
             return Ok(methode_refusee(
-                self.alt_svc(),
-                resolu.resource,
-                place_de_la_reponse,
-            ));
-        }
-
-        // 6 bis. `OPTIONS` SE RÉPOND ICI, et ne descend pas dans l'application :
-        //        aucun de ses bras ne la reconnaît, et elle y rendrait 501. Ce
-        //        qu'elle demande — les méthodes servies — est dans la table de
-        //        routage, sous la main, et ne dépend d'aucun magasin.
-        if matches!(resolu.method, Method::Options) {
-            return Ok(methodes_servies(
                 self.alt_svc(),
                 resolu.resource,
                 place_de_la_reponse,
@@ -957,6 +970,32 @@ fn decimales(valeur: u16, out: &mut [u8; 5]) -> usize {
 
 /// Le nom du champ qui porte le type d'un contenu.
 const EN_TETE_TYPE: &[u8] = b"content-type";
+
+/// Le document OpenAPI de cette API, **embarqué à la compilation**.
+///
+/// # IL N'EST PAS ÉCRIT, IL EST ENGENDRÉ — ET IL N'EST PAS LU, IL EST EMBARQUÉ
+///
+/// `air-mail-admin openapi` l'engendre depuis la table de routage, et
+/// `scripts/check-openapi.sh` exige que le fichier commité soit celui que le
+/// code produit. Ce qui est servi ici est donc, par construction, ce que le
+/// serveur fait — et l'embarquer évite une lecture de fichier, que C1 interdit
+/// de toute façon à cette crate.
+const OPENAPI: &str = include_str!("../../../docs/openapi.json");
+
+/// L'`ETag` du document.
+///
+/// **C'EST LA VERSION DU SERVEUR, ET C'EST EXACT PLUTÔT QUE COMMODE.** Le
+/// document porte `info.version` : deux versions égales décrivent donc le même
+/// document, et `check-compile` exige déjà que le code et les pages de manuel
+/// annoncent la même. Un `ETag` fort (§8.8.3 de RFC 9110) se cite entre
+/// guillemets.
+const OPENAPI_ETAG: &[u8] = concat!("\"", env!("CARGO_PKG_VERSION"), "\"").as_bytes();
+
+/// Le nom de l'en-tête `ETag`.
+const EN_TETE_ETAG: &[u8] = b"etag";
+
+/// Le nom de l'en-tête `If-None-Match`.
+const EN_TETE_SI_AUCUN: &[u8] = b"if-none-match";
 
 /// Le nom de l'en-tête `Allow`.
 ///
@@ -1337,6 +1376,54 @@ fn champs_ordinaires<'o>(
         *place = Some(champ);
     }
     champs
+}
+
+/// Le document OpenAPI, ou un `304` si le client l'a déjà.
+///
+/// # ELLE N'EXIGE AUCUN JETON, ET LE `304` EST CE QUI LE REND TENABLE
+///
+/// Deux cent dix kibioctets rendus avant toute vérification, ce serait un
+/// robinet : mille requêtes par seconde feraient deux cents mégaoctets par
+/// seconde en sortie d'une machine dont le métier est le courrier.
+///
+/// Deux choses le bornent. Le garde (C8) compte cette requête comme toute autre,
+/// donc les seuils par source s'y appliquent. Et l'`ETag` fait qu'un client qui
+/// revient coûte un `304` de quelques octets — ce que tout outil OpenAPI fait,
+/// puisqu'il met le document en cache.
+///
+/// **UN `304` NE PORTE NI CORPS NI TYPE** (§15.3.5 de RFC 9110), et il reprend
+/// l'`ETag` pour que le client sache lequel il vient de valider.
+fn le_document<'o>(alt_svc: &'o [u8], tete: &RequestHead<'_>, sortie: &'o mut [u8]) -> Turn<'o> {
+    let _ = sortie;
+    // **UNE COMPARAISON D'OCTETS, ET RIEN DE PLUS.** §8.8.3.2 décrit une liste
+    // et un `*` ; cette ressource n'a qu'une représentation, et un client qui
+    // enverrait une liste n'obtiendra qu'un document entier — jamais une
+    // réponse fausse.
+    if tete.field(EN_TETE_SI_AUCUN) == Some(OPENAPI_ETAG) {
+        return Turn {
+            status: StatusCode::NOT_MODIFIED,
+            fields: champs_ordinaires(
+                StatusCode::NOT_MODIFIED,
+                alt_svc,
+                &[(EN_TETE_ETAG, OPENAPI_ETAG)],
+            ),
+            body: &[],
+            next: Next::Respond,
+        };
+    }
+    Turn {
+        status: StatusCode::OK,
+        fields: champs_ordinaires(
+            StatusCode::OK,
+            alt_svc,
+            &[
+                (EN_TETE_TYPE, JSON_MEDIA_TYPE.as_bytes()),
+                (EN_TETE_ETAG, OPENAPI_ETAG),
+            ],
+        ),
+        body: OPENAPI.as_bytes(),
+        next: Next::Respond,
+    }
 }
 
 /// Le refus d'une méthode, **avec son `Allow`**.

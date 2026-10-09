@@ -2205,22 +2205,39 @@ fn un_405_de_porte_d_entree_porte_son_allow() {
     assert_eq!(champ(&tour, b"allow").as_deref(), Some("POST, OPTIONS"));
 }
 
-/// **`OPTIONS` EXIGE UN JETON, COMME LE RESTE.**
+/// **`OPTIONS` NE DEMANDE AUCUN JETON**, et c'est une décision mesurée.
 ///
-/// `Allow` dit quelles méthodes existent sur un chemin : le rendre à un inconnu
-/// ferait de ce routeur un annuaire public, ce que le point 5 de `decider`
-/// refuse exprès. C'est aussi pourquoi un sondage CORS — sans identifiant —
-/// recevra 401, et pourquoi ouvrir CORS demandera une décision.
+/// # ELLE EN EXIGEAIT UN, ET CE REFUS NE PROTÉGEAIT RIEN
+///
+/// Le motif était : `Allow` dit quelles méthodes existent sur un chemin, et le
+/// rendre à un inconnu ferait de ce routeur un annuaire public. Deux mesures ont
+/// montré que l'annuaire était déjà ouvert, et que cette réponse-ci n'y ajoute
+/// rien — voir `ce_qu_un_inconnu_apprend_et_ce_qu_il_n_apprend_pas` et
+/// `l_allow_ne_depend_jamais_de_l_objet`.
+///
+/// **DÉCOUVRIR N'EST PAS UTILISER.** `OPTIONS` demande ce que l'API fait ; tout
+/// le reste lui demande de faire quelque chose. Et c'est ce qui rend possible le
+/// sondage préalable de CORS, qui est sans identifiant par définition.
 #[test]
-fn options_sans_jeton_est_refusee() {
-    let mut place = [0_u8; PLACE];
-    let session = une_session();
-    let tour = tour_de(b"OPTIONS", b"/v1/mailboxes", b"", &mut place, &session);
-    assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
-    assert!(
-        champ(&tour, b"allow").is_none(),
-        "un refus d'autorisation ne dit pas ce que la ressource sert"
-    );
+fn options_ne_demande_aucun_jeton() {
+    for (chemin, attendu) in [
+        (&b"/v1/mailboxes"[..], "GET, HEAD, OPTIONS"),
+        (b"/v1/health", "GET, HEAD, OPTIONS"),
+        (b"/v1/accounts/ada", "GET, HEAD, PUT, DELETE, OPTIONS"),
+        (b"/v1/tokens", "POST, OPTIONS"),
+    ] {
+        let mut place = [0_u8; PLACE];
+        let session = une_session();
+        let tour = tour_de(b"OPTIONS", chemin, b"", &mut place, &session);
+        assert_eq!(
+            tour.status(),
+            StatusCode::NO_CONTENT,
+            "{} : OPTIONS répond sans jeton",
+            texte(chemin)
+        );
+        assert_eq!(champ(&tour, b"allow").as_deref(), Some(attendu));
+        assert!(tour.body().is_empty(), "un 204 ne porte pas de corps");
+    }
 }
 
 /// `OPTIONS` sur une porte d'entrée n'exige rien, et rend son `Allow`.
@@ -2343,9 +2360,14 @@ fn un_allow_sans_place_ne_coupe_pas_un_nom() {
 /// pour `OPTIONS` protège-t-il quelque chose ? La mesure dit non, et dit pourquoi.
 ///
 /// **CE QUI EST DÉJÀ PUBLIC : LA LISTE DES GABARITS.** Un chemin qui existe rend
-/// `401`, un chemin inventé rend `404` — sans jeton, pour tout verbe. La surface
-/// des routes est donc énumérable par n'importe qui, aujourd'hui, et le document
-/// OpenAPI ne révélera rien de plus.
+/// `401`, un chemin inventé rend `404` — sans jeton, et pour tout verbe qui n'est
+/// pas `OPTIONS`. La surface des routes est donc énumérable par n'importe qui,
+/// aujourd'hui, et le document OpenAPI la publie désormais de toute façon.
+///
+/// **C'EST CE CONSTAT QUI A OUVERT `OPTIONS` SANS JETON** : refuser de dire ce
+/// qu'une ressource sert ne cachait rien que ces deux codes ne disent déjà. Elle
+/// rend donc `204` ici, et `404` sur un gabarit inventé — jamais `204` sur un
+/// chemin qui n'existe pas, ce qui dirait qu'il existe.
 ///
 /// **CE QUI RESTE CACHÉ : L'EXISTENCE D'UN OBJET.** `/v1/accounts/<n'importe
 /// quoi>` rend `401` que le compte existe ou non. C'est le secret que la tranche
@@ -2359,7 +2381,9 @@ fn ce_qu_un_inconnu_apprend_et_ce_qu_il_n_apprend_pas() {
         b"/v1/accounts/ada",
         b"/v1/me/audit",
     ] {
-        for methode in [&b"GET"[..], b"OPTIONS", b"PATCH", b"DELETE"] {
+        // **`OPTIONS` EST À PART** : elle répond, puisqu'elle ne dit rien de
+        // plus que le gabarit. Tout le reste demande un jeton.
+        for methode in [&b"GET"[..], b"PATCH", b"DELETE"] {
             let mut place = [0_u8; PLACE];
             let session = une_session();
             let tour = tour_de(methode, chemin, b"", &mut place, &session);
@@ -2371,6 +2395,15 @@ fn ce_qu_un_inconnu_apprend_et_ce_qu_il_n_apprend_pas() {
                 texte(chemin)
             );
         }
+        let mut place = [0_u8; PLACE];
+        let session = une_session();
+        let tour = tour_de(b"OPTIONS", chemin, b"", &mut place, &session);
+        assert_eq!(
+            tour.status(),
+            StatusCode::NO_CONTENT,
+            "{} : OPTIONS répond sans jeton",
+            texte(chemin)
+        );
     }
 
     // Un gabarit inventé : `404`, sans jeton, pour tout verbe.
@@ -2432,6 +2465,115 @@ fn l_allow_ne_depend_jamais_de_l_objet() {
             plausible.allow(&mut un),
             absurde.allow(&mut autre),
             "l'`Allow` distingue deux objets : c'est un oracle d'existence"
+        );
+    }
+}
+
+// ── LE DOCUMENT OPENAPI ─────────────────────────────────────────────────────
+
+/// **LE DOCUMENT SE REND SANS JETON**, et c'est de la découverte, non de l'usage.
+///
+/// # DÉCOUVRIR N'EST PAS UTILISER
+///
+/// Ce document décrit l'API comme un PRODUIT : les mêmes chemins pour tout
+/// appelant, quelle que soit l'installation. Il ne nomme aucun compte, aucune
+/// boîte, aucun domaine, aucun réglage. Et ce qu'il publie — la liste des
+/// gabarits — est déjà énumérable sans jeton, par le seul écart entre `401` et
+/// `404` (voir `ce_qu_un_inconnu_apprend_et_ce_qu_il_n_apprend_pas`).
+#[test]
+fn le_document_openapi_se_rend_sans_jeton() {
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = tour_de(b"GET", b"/v1/openapi.json", b"", &mut place, &session);
+    assert_eq!(tour.status(), StatusCode::OK);
+    assert_eq!(tour.media(), "application/json");
+    assert!(
+        tour.body().starts_with(b"{\n  \"openapi\": \"3.1.0\""),
+        "le corps n'est pas le document"
+    );
+    assert!(
+        tour.body().len() > 100_000,
+        "le document fait {} octets",
+        tour.body().len()
+    );
+    // Il se décrit lui-même.
+    assert!(
+        core::str::from_utf8(tour.body())
+            .expect("de l'UTF-8")
+            .contains("\"/v1/openapi.json\""),
+        "le document ne se décrit pas"
+    );
+}
+
+/// **L'`ETag` EST LA VERSION**, et un client qui l'a déjà obtient un `304`.
+///
+/// C'est ce qui rend tenable une route sans jeton : un outil OpenAPI met le
+/// document en cache, et sa relecture coûte alors quelques octets au lieu de
+/// deux cent dix kibioctets.
+#[test]
+fn le_document_se_valide_par_son_etag() {
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = tour_de(b"GET", b"/v1/openapi.json", b"", &mut place, &session);
+    let etiquette = champ(&tour, b"etag").expect("un `ETag`");
+    assert_eq!(
+        etiquette,
+        std::format!("\"{}\"", env!("CARGO_PKG_VERSION")),
+        "l'`ETag` devrait être la version, entre guillemets"
+    );
+
+    // Le même `ETag` présenté : `304`, sans corps et sans type.
+    let champs = std::vec![
+        (&b":method"[..], &b"GET"[..]),
+        (&b":scheme"[..], &b"https"[..]),
+        (&b":authority"[..], &b"exemple.fr"[..]),
+        (&b":path"[..], &b"/v1/openapi.json"[..]),
+        (&b"if-none-match"[..], etiquette.as_bytes()),
+    ];
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::NOT_MODIFIED);
+    assert!(tour.body().is_empty(), "un 304 ne porte pas de corps");
+    assert_eq!(tour.media(), "", "un 304 n'annonce pas de type");
+    assert_eq!(champ(&tour, b"etag").as_deref(), Some(etiquette.as_str()));
+}
+
+/// Un `ETag` qui ne correspond pas rend le document entier.
+#[test]
+fn un_etag_perime_rend_le_document() {
+    let champs = std::vec![
+        (&b":method"[..], &b"GET"[..]),
+        (&b":scheme"[..], &b"https"[..]),
+        (&b":authority"[..], &b"exemple.fr"[..]),
+        (&b":path"[..], &b"/v1/openapi.json"[..]),
+        (&b"if-none-match"[..], &b"\"0.0.1\""[..]),
+    ];
+    let tete = entete(&champs);
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = session.request(&tete, &[], MAINTENANT, &mut place);
+    assert_eq!(tour.status(), StatusCode::OK);
+    assert!(!tour.body().is_empty());
+}
+
+/// Le document ne se lit que par `GET` et `HEAD`, et son `405` porte l'`Allow`.
+#[test]
+fn le_document_ne_s_ecrit_pas() {
+    for methode in [&b"POST"[..], b"PUT", b"DELETE", b"PATCH"] {
+        let mut place = [0_u8; PLACE];
+        let session = une_session();
+        let tour = tour_de(methode, b"/v1/openapi.json", b"", &mut place, &session);
+        assert_eq!(
+            tour.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{} devrait être refusée",
+            texte(methode)
+        );
+        assert_eq!(
+            champ(&tour, b"allow").as_deref(),
+            Some("GET, HEAD, OPTIONS")
         );
     }
 }

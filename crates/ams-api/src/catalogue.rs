@@ -296,6 +296,11 @@ pub const CATALOGUE: &[Entree] = &[
         exemplaire: Resource::Metrics,
         resume: "Ses compteurs.",
     },
+    Entree {
+        gabarit: "/v1/openapi.json",
+        exemplaire: Resource::OpenApi,
+        resume: "Ce document même : ce que cette API fait. N'exige aucun jeton — découvrir n'est pas utiliser.",
+    },
 ];
 
 #[cfg(test)]

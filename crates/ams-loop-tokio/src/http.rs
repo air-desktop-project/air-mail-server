@@ -73,7 +73,12 @@ const TRAVAIL_OCTETS: usize = SCRATCH_OCTETS_MIN + 64 * 1024;
 const ENTETES_OCTETS: usize = 16 * 1024;
 
 /// Ce qu'une réponse servie peut porter.
-const RENDU_OCTETS: usize = 256 * 1024;
+///
+/// **LES DEUX TRANSPORTS PARTAGENT CETTE BORNE**, et une assertion de
+/// compilation l'exige dans `h3.rs` : celui d'HTTP/3 valait 64 Kio, soit quatre
+/// fois moins. Une réponse qui tenait sur un transport était donc refusée sur
+/// l'autre, et le client ne savait pas auquel des deux il parlait.
+pub(crate) const RENDU_OCTETS: usize = 256 * 1024;
 
 /// Combien de champs une réponse porte au plus, `content-type` compris.
 const CHAMPS_MAX: usize = ams_session::http::FIELDS_MAX + 1 + ams_session::http::PIECE_MAX;

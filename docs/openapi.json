@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "air-mail-server — API REST",
-    "version": "0.2.68",
+    "version": "0.2.69",
     "summary": "Lire et envoyer du courrier, et administrer ce serveur.",
     "description": "Ce document est ENGENDRÉ depuis la table de routage du serveur (`ams-api::catalogue`) : les chemins, les méthodes servies et la portée exigée par opération ne peuvent donc pas s'écarter de ce qui est servi, et une barrière de CI le vérifie à chaque changement.\n\nCE QU'IL NE DÉCRIT PAS : les schémas de corps de requête et de réponse, et les codes de succès exacts. Ceux-là vivent dans les gestionnaires et non dans la table ; les déclarer ici sans les y lire serait les inventer. Les succès sont donc donnés par plage (2XX).\n\nLes refus, eux, sont exacts : `application/problem+json` (RFC 9457), et les types énumérés sont ceux de l'énumération `Reason`.\n\nLa version est dans le chemin, et elle est obligatoire : `/v1/…`.\n\n`OPTIONS` est servie sur toute ressource qui existe (§9.3.7) : elle rend un 204 sans corps, portant l'en-tête `Allow`, dont ce document donne la valeur exacte par chemin. Elle exige un jeton comme le reste — `Allow` dit quelles méthodes existent, et le rendre à un inconnu ferait de ce routeur un annuaire public. Un 405 porte le même en-tête, comme §15.5.6 de RFC 9110 l'exige.",
     "license": {
@@ -6965,6 +6965,159 @@
         "observe"
       ],
         "description": "Exige un jeton dont la portée ouvre `observe:read`.",
+        "responses": {
+          "204": {
+            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110). Aucun corps.",
+            "headers": {
+              "Allow": {
+                "description": "Les méthodes que cette ressource sert.",
+                "schema": {
+                  "type": "string",
+                  "const": "GET, HEAD, OPTIONS"
+                }
+              }
+            }
+          },
+          "400": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "401": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "403": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "404": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "405": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "409": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "410": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "413": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "429": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "500": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "default": {
+          "$ref": "#/components/responses/Probleme"
+        }
+        }
+      }
+    },
+    "/v1/openapi.json": {
+      "description": "Ce document même : ce que cette API fait. N'exige aucun jeton — découvrir n'est pas utiliser.",
+      "get": {
+        "summary": "Ce document même : ce que cette API fait. N'exige aucun jeton — découvrir n'est pas utiliser.",
+        "operationId": "get_v1_openapi_json",
+        "tags": [
+        "portes d'entrée"
+      ],
+        "description": "N'EXIGE AUCUN JETON : c'est une porte d'entrée. Ce qui autorise est dans le corps.",
+        "security": [],
+        "responses": {
+          "2XX": {
+            "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
+          },
+          "400": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "401": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "403": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "404": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "405": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "409": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "410": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "413": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "429": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "500": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "default": {
+          "$ref": "#/components/responses/Probleme"
+        }
+        }
+      },
+      "head": {
+        "summary": "Ce document même : ce que cette API fait. N'exige aucun jeton — découvrir n'est pas utiliser.",
+        "operationId": "head_v1_openapi_json",
+        "tags": [
+        "portes d'entrée"
+      ],
+        "description": "N'EXIGE AUCUN JETON : c'est une porte d'entrée. Ce qui autorise est dans le corps.",
+        "security": [],
+        "responses": {
+          "2XX": {
+            "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
+          },
+          "400": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "401": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "403": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "404": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "405": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "409": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "410": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "413": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "429": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "500": {
+          "$ref": "#/components/responses/Probleme"
+        },
+          "default": {
+          "$ref": "#/components/responses/Probleme"
+        }
+        }
+      },
+      "options": {
+        "summary": "Ce document même : ce que cette API fait. N'exige aucun jeton — découvrir n'est pas utiliser.",
+        "operationId": "options_v1_openapi_json",
+        "tags": [
+        "portes d'entrée"
+      ],
+        "description": "N'EXIGE AUCUN JETON : c'est une porte d'entrée. Ce qui autorise est dans le corps.",
+        "security": [],
         "responses": {
           "204": {
             "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110). Aucun corps.",

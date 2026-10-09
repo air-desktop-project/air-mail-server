@@ -6442,6 +6442,84 @@ en-tête part, c'est une réponse lue sur le fil** — et c'est pourquoi l'asser
 qui garde cette tranche vit dans `crates/ams-server/tests/api.rs`, derrière un
 vrai `curl`, et non dans les essais de la session.
 
+## Découvrir n'est pas utiliser : `OPTIONS` et le document, sans jeton
+
+`OPTIONS` exigeait un jeton, et le document OpenAPI n'était pas servi. Le motif
+était celui de la section sur le `405` : `Allow` dit quelles méthodes existent
+sur un chemin, et le rendre à un inconnu referait de ce routeur un annuaire
+public.
+
+**DEUX MESURES ONT MONTRÉ QUE CE REFUS NE PROTÉGEAIT RIEN**, et les deux sont
+figées en essais plutôt qu'écrites ici seulement.
+
+### Ce qu'`OPTIONS` révèle : le gabarit, jamais l'objet
+
+`Resource::allowed` est un `match` sur la VARIANTE et ne consulte aucun magasin.
+
+| ressource | `Allow` rendu |
+|---|---|
+| `Mailbox { "INBOX" }` | `GET, HEAD, PUT, DELETE, OPTIONS` |
+| `Mailbox { "n-existe-pas" }` | `GET, HEAD, PUT, DELETE, OPTIONS` |
+| `Account { "ada" }` | `GET, HEAD, PUT, DELETE, OPTIONS` |
+| `Account { "fantome-total" }` | `GET, HEAD, PUT, DELETE, OPTIONS` |
+
+Essai : `l_allow_ne_depend_jamais_de_l_objet`. **Le jour où cela cesserait d'être
+vrai** — une boîte en lecture seule qui n'annoncerait pas `PUT`, ce qui paraît
+raisonnable —, `OPTIONS` deviendrait un oracle d'existence. Cet essai est ce qui
+l'empêche.
+
+### Ce qui est DÉJÀ public : la liste des gabarits
+
+Sans aucun jeton, aujourd'hui :
+
+| chemin | GET | PATCH | DELETE | |
+|---|---|---|---|---|
+| `/v1/health` | 401 | 401 | 401 | gabarit **connu** |
+| `/v1/accounts/ada` | 401 | 401 | 401 | gabarit **connu** |
+| `/v1/inconnu` | **404** | **404** | **404** | gabarit **inventé** |
+| `/v1/mailboxes/INBOX/zzz` | **404** | **404** | **404** | gabarit **inventé** |
+
+L'écart entre `401` et `404` énumère donc la surface des routes en une boucle,
+par n'importe qui. C'est inévitable dès que `resolve` tranche avant
+l'autorisation, et ce n'est pas un défaut : **ce qui doit rester caché est
+l'existence d'un OBJET**, et elle l'est — `/v1/accounts/<n'importe quoi>` rend
+`401` que le compte existe ou non. Essai :
+`ce_qu_un_inconnu_apprend_et_ce_qu_il_n_apprend_pas`.
+
+### Ce qui a été décidé, et par quoi c'est borné
+
+`OPTIONS` répond **sans jeton**, au point 4 ter de `decider` — avant
+l'autorisation, et non après. `/v1/openapi.json` se rend **sans jeton** aussi.
+
+Ce qui borne le coût d'une route publique de deux cent dix kibioctets :
+
+- le garde (C8) compte la requête comme toute autre, donc les seuils par source
+  s'y appliquent ;
+- un **`ETag`** fait qu'un client qui revient coûte un `304` de quelques octets
+  — et tout outil OpenAPI met le document en cache. L'`ETag` est **la version du
+  serveur**, ce qui est exact plutôt que commode : le document porte
+  `info.version`, donc deux versions égales décrivent le même document.
+
+### Et une quatrième divergence entre les deux conducteurs, trouvée en chemin
+
+Le document fait 210 Kio. `RENDU_OCTETS` valait **256 Kio en HTTP/2 et 64 Kio en
+HTTP/3** : une réponse de 100 Kio était donc servie sur un transport et refusée
+sur l'autre, la même requête et le même compte, pour un résultat qui dépendait du
+protocole choisi par le client. Les deux bornes sont désormais la même constante,
+et `const _: () = assert!(…)` l'exige à la compilation — comme pour les champs de
+toute réponse et la borne d'un message. **Ce tampon est unique pour tout le
+processus**, donc l'alignement coûte 192 Kio, une fois.
+
+### Ce qui reste à décider, et ce n'est pas technique
+
+**CORS.** Un sondage préalable est sans identifiant par définition ; `OPTIONS`
+répondant désormais sans jeton, il aboutirait. Ce qui manque est la liste des
+origines autorisées — et elle est vide aujourd'hui, aucun client de ce serveur ne
+tournant dans un navigateur. Les trois fautes à ne pas commettre le jour où elle
+ne le sera plus : `*` avec `Allow-Credentials` (inutile ici, l'API n'emploie
+aucun cookie), renvoyer l'`Origin` reçue sans la valider, et oublier
+`Vary: Origin`.
+
 ## POP3 répondait deux fois au `PASS`, et ne servait donc aucun client conforme
 
 Le 2026-09-05, `poplib` — le client POP3 de la bibliothèque standard de Python —

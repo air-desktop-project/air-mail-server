@@ -36,7 +36,22 @@ use crate::http::{Admission, Api, Door};
 const TRAVAIL_OCTETS: usize = 8 * 1024;
 
 /// Ce qu'une réponse servie par l'API peut faire.
-const RENDU_OCTETS: usize = 64 * 1024;
+///
+/// **IL VALAIT 64 KIO, CONTRE 256 EN HTTP/2.** Une réponse de 100 Kio était donc
+/// servie sur un transport et refusée sur l'autre — la même requête, le même
+/// compte, et un résultat qui dépendait du protocole que le client avait choisi.
+/// C'est la quatrième divergence trouvée entre ces deux composeurs, après les
+/// champs de toute réponse, ceux d'une partie de message, et le type de contenu.
+///
+/// **CE TAMPON EST UNIQUE POUR TOUT LE PROCESSUS** : il vit dans
+/// `Http3Application`, créée une fois, et non par connexion. Le porter à 256 Kio
+/// coûte donc 192 Kio au total, une fois.
+const RENDU_OCTETS: usize = crate::http::RENDU_OCTETS;
+
+// **ET LA COMPILATION L'EXIGE**, comme pour les champs et la borne d'un message :
+// deux bornes de réponse qui diffèrent sont deux API, et personne ne le voit en
+// lisant l'une des deux.
+const _: () = assert!(RENDU_OCTETS == crate::http::RENDU_OCTETS);
 
 /// Le pont entre HTTP/3 et une connexion QUIC.
 ///

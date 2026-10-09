@@ -462,6 +462,7 @@ fn segments_de(
         }
         Resource::Health => pousser("health"),
         Resource::Metrics => pousser("metrics"),
+        Resource::OpenApi => pousser("openapi.json"),
     }
     segments
 }
