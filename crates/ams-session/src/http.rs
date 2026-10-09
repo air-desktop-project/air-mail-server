@@ -52,28 +52,6 @@ use ams_api::{
 };
 use ams_proto_http::{Method, RequestHead, StatusCode};
 
-/// Cette ressource accepte-t-elle ces paramètres, sous ce verbe ?
-///
-/// **TROIS RESSOURCES EN PRENNENT, EN LECTURE SEULEMENT** : la liste des
-/// messages (`before`, `limit`), le journal des changements (`since`,
-/// EXIGÉ, et `limit`) et le journal d'audit (`limit`). Ailleurs, un paramètre est refusé plutôt qu'ignoré : un
-/// client qui croit filtrer ce qui ne l'est pas ne s'en apercevrait jamais.
-fn requete_permise(ressource: Resource<'_>, verbe: Method, requete: &Query) -> bool {
-    let lecture = matches!(verbe, Method::Get | Method::Head);
-    match ressource {
-        Resource::Messages { .. } => requete.is_empty() || (lecture && requete.since.is_none()),
-        // **`since` EST EXIGÉ** : une synchronisation incrémentale part de
-        // quelque part. Sans lui, la réponse serait « tout » — ce que la liste
-        // des messages rend déjà, et mieux.
-        Resource::Changes { .. } => requete.since.is_some() && requete.before.is_none(),
-        // Le journal d'audit ne se lit que par la fin : `limit`, et rien d'autre.
-        Resource::OwnAudit | Resource::AccountAudit { .. } => {
-            requete.before.is_none() && requete.since.is_none()
-        }
-        _ => requete.is_empty(),
-    }
-}
-
 /// Ce qu'un document JSON peut faire de long.
 ///
 /// Soixante-quatre kibioctets. Aucun document de cette API n'a besoin de
@@ -626,7 +604,7 @@ impl Http {
         }
 
         // 8. Les paramètres, maintenant qu'on sait ce qu'ils visent.
-        if !requete_permise(resolu.resource, resolu.method, &requete) {
+        if !resolu.resource.requete_permise(resolu.method, &requete) {
             return Err((Reason::BadQuery, place_de_la_reponse));
         }
 

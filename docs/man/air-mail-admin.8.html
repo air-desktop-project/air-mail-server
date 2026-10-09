@@ -98,7 +98,7 @@ li { margin-bottom: .3rem; }
 </head>
 <body>
 <div class="page">
-<div class="bandeau"><span>air-mail-admin(8)</span><span>Administration système</span><span>air-mail-server 0.2.66</span></div>
+<div class="bandeau"><span>air-mail-admin(8)</span><span>Administration système</span><span>air-mail-server 0.2.67</span></div>
 <h1>air-mail-admin</h1>
 <p class="resume">contrôle et configuration d'air-mail-server</p>
 
@@ -184,6 +184,29 @@ porte pas</strong> : « AUCUN MAGASIN », « NON SERVI », « aucune ». C'est l
 source de vérité sur ce qu'une machine porte.
 <strong>Le mot de passe du relais n'est pas affiché</strong>, et le secret de
 scellement non plus.</p></dd>
+</dl>
+
+<h3>Le contrat de l'API REST</h3>
+<dl>
+<dt>openapi</dt>
+<dd><p>écrit sur la sortie standard le document <strong>OpenAPI 3.1</strong> de
+l'API REST que cette version sert.</p>
+<p><strong>Elle ne prend aucun fichier</strong>, et ce n'est pas un oubli : le
+document ne décrit pas <em>cette</em> installation &mdash; il ne lit ni écoute,
+ni domaine, ni magasin &mdash; mais l'API que ce binaire sert. Lui passer un
+chemin laisserait croire le contraire.</p>
+<p><strong>Il est engendré, et non écrit.</strong> Les chemins, les méthodes
+servies, les paramètres et la portée exigée par opération sont lus sur la table
+de routage elle-même &mdash; les mêmes fonctions que le serveur interroge pour
+router et pour autoriser. Un document d'API écrit à la main est faux le jour où
+une route bouge, et personne ne s'en aperçoit.</p>
+<p><strong>Ce qu'il ne dit pas</strong>, et il le dit de lui-même : les schémas
+de corps de requête et de réponse, et les codes de succès exacts. Ceux-là vivent
+dans les gestionnaires et non dans la table ; les déclarer sans les y lire serait
+les inventer. Les succès sont donc donnés par plage (<code>2XX</code>).</p>
+<p>Le document commité en <code>docs/openapi.json</code> est celui que cette
+commande engendre, et <code>scripts/check-openapi.sh</code> l'exige à chaque
+poussée.</p></dd>
 </dl>
 
 <h3>Comptes</h3>

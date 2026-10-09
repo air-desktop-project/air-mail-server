@@ -1038,3 +1038,73 @@ fn les_appareils_d_un_compte_s_administrent() {
         Err(Reason::NoSuchResource)
     );
 }
+
+/// Une requête qui ne porte que ce paramètre.
+fn avec(nom: &str) -> crate::query::Query {
+    let mut requete = crate::query::Query::default();
+    match nom {
+        "since" => requete.since = Some(1),
+        "before" => requete.before = Some(1),
+        "limit" => requete.limit = Some(1),
+        _ => panic!("paramètre inconnu : {nom}"),
+    }
+    requete
+}
+
+/// Ce que chaque ressource accepte comme paramètres de requête.
+///
+/// **LES QUATRE BRANCHES, Y COMPRIS L'AUDIT D'AUTRUI.** Cette règle vivait dans
+/// `ams-session`, où seul `/v1/me/audit` était emprunté par un essai : la
+/// branche `AccountAudit` n'était jamais prise. Elle l'est ici.
+#[test]
+fn les_parametres_de_requete_admis() {
+    let vide = crate::query::Query::default();
+
+    // La liste des messages : `before` et `limit` en lecture, jamais `since`.
+    let messages = Resource::Messages { boite: "INBOX" };
+    assert!(messages.requete_permise(Method::Get, &vide));
+    assert!(messages.requete_permise(Method::Get, &avec("before")));
+    assert!(messages.requete_permise(Method::Get, &avec("limit")));
+    assert!(!messages.requete_permise(Method::Get, &avec("since")));
+    // **PAS EN ÉCRITURE** : un `POST` qui déposerait un message en filtrant
+    // n'aurait aucun sens, et l'ignorer le laisserait croire.
+    assert!(!messages.requete_permise(Method::Post, &avec("before")));
+    assert!(messages.requete_permise(Method::Post, &vide));
+
+    // Le journal des changements : `since` EXIGÉ, `before` refusé.
+    let changes = Resource::Changes { boite: "INBOX" };
+    assert!(!changes.requete_permise(Method::Get, &vide));
+    assert!(changes.requete_permise(Method::Get, &avec("since")));
+    assert!(!changes.requete_permise(Method::Get, &avec("before")));
+    assert!(!changes.requete_permise(Method::Get, &avec("limit")));
+    let mut deux = avec("since");
+    deux.limit = Some(10);
+    assert!(changes.requete_permise(Method::Get, &deux));
+    let mut trois = avec("since");
+    trois.before = Some(5);
+    assert!(!changes.requete_permise(Method::Get, &trois));
+
+    // Les deux journaux d'audit : `limit`, et rien d'autre.
+    for audit in [Resource::OwnAudit, Resource::AccountAudit { compte: "ada" }] {
+        assert!(audit.requete_permise(Method::Get, &vide));
+        assert!(audit.requete_permise(Method::Get, &avec("limit")));
+        assert!(!audit.requete_permise(Method::Get, &avec("since")));
+        assert!(!audit.requete_permise(Method::Get, &avec("before")));
+    }
+
+    // Partout ailleurs, aucun paramètre : il est refusé, pas ignoré.
+    for ressource in [
+        Resource::Mailboxes,
+        Resource::Health,
+        Resource::Tokens,
+        Resource::Bans,
+    ] {
+        assert!(ressource.requete_permise(Method::Get, &vide));
+        for nom in ["since", "before", "limit"] {
+            assert!(
+                !ressource.requete_permise(Method::Get, &avec(nom)),
+                "{ressource:?} ne devrait pas accepter {nom}"
+            );
+        }
+    }
+}

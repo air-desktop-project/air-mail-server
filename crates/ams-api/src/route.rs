@@ -34,6 +34,7 @@ use ams_proto_http::Method;
 
 use crate::error::{Error, Reason};
 use crate::path::{Segments, decode};
+use crate::query::Query;
 use crate::scope::{Area, Rights, Scope};
 
 /// La version d'API que porte le chemin.
@@ -516,6 +517,107 @@ impl Resource<'_> {
         // `OPTIONS` s'applique à toute ressource qui existe (§9.3.7) : c'est le
         // moyen normalisé de demander ce que `allowed` rend.
         matches!(method, Method::Options) || self.allowed().contains(&method)
+    }
+
+    /// Cette ressource accepte-t-elle ces paramètres, sous ce verbe ?
+    ///
+    /// # ELLE VIVAIT DANS `ams-session`, ET C'ÉTAIT UNE TABLE DE TROP
+    ///
+    /// Une fonction libre, à côté de la boucle HTTP, qui disait d'une ressource
+    /// ce que cette énumération dit déjà de toutes les autres — portée, méthodes.
+    /// Elle a été déplacée ici SANS CHANGER UNE LIGNE de sa logique, pour la même
+    /// raison que `scope` y vit : **ce qu'une ressource accepte se lit sur la
+    /// ressource**, d'un seul endroit.
+    ///
+    /// Et cela rend la règle ÉNUMÉRABLE : le document OpenAPI la sonde — un
+    /// paramètre à la fois — au lieu de la recopier. Une API documentée qui
+    /// mentirait sur ses paramètres de requête est redevenue impossible.
+    ///
+    /// **TROIS RESSOURCES EN PRENNENT, EN LECTURE SEULEMENT** : la liste des
+    /// messages (`before`, `limit`), le journal des changements (`since`,
+    /// EXIGÉ, et `limit`) et le journal d'audit (`limit`). Ailleurs, un paramètre est refusé plutôt qu'ignoré : un
+    /// client qui croit filtrer ce qui ne l'est pas ne s'en apercevrait jamais.
+    pub const fn requete_permise(self, verbe: Method, requete: &Query) -> bool {
+        let lecture = matches!(verbe, Method::Get | Method::Head);
+        match self {
+            Self::Messages { .. } => requete.is_empty() || (lecture && requete.since.is_none()),
+            // **`since` EST EXIGÉ** : une synchronisation incrémentale part de
+            // quelque part. Sans lui, la réponse serait « tout » — ce que la liste
+            // des messages rend déjà, et mieux.
+            Self::Changes { .. } => requete.since.is_some() && requete.before.is_none(),
+            // Le journal d'audit ne se lit que par la fin : `limit`, et rien d'autre.
+            Self::OwnAudit | Self::AccountAudit { .. } => {
+                requete.before.is_none() && requete.since.is_none()
+            }
+            _ => requete.is_empty(),
+        }
+    }
+
+    /// Son rang dans [`crate::catalogue::CATALOGUE`].
+    ///
+    /// # CE `match` EST LA GARDE DU CATALOGUE
+    ///
+    /// Il est exhaustif : **ajouter une ressource sans lui donner de rang ne
+    /// compile pas**. Et l'essai qui exige que les rangs du catalogue soient
+    /// exactement `0..len`, chacun une fois, échoue si la nouvelle ressource n'y
+    /// est pas décrite.
+    ///
+    /// C'est ce qui rend impossible la panne ordinaire d'une documentation
+    /// d'API : une route servie que le document ne mentionne pas. Ici, elle ne
+    /// se compile pas, puis elle ne passe pas les essais.
+    ///
+    /// **CE RANG N'A AUCUN SENS AU-DEHORS.** Ce n'est ni un identifiant stable,
+    /// ni un ordre de tri : c'est une place dans un tableau, et elle change
+    /// quand le tableau change.
+    #[must_use]
+    pub const fn rang(self) -> usize {
+        match self {
+            Self::Tokens => 0,
+            Self::CurrentToken => 1,
+            Self::SessionChallenge => 2,
+            Self::Sessions => 3,
+            Self::Devices => 4,
+            Self::Invitations => 5,
+            Self::OwnPassword => 6,
+            Self::OwnDevices => 7,
+            Self::OwnDevice { .. } => 8,
+            Self::OwnPush => 9,
+            Self::OwnAppPasswords => 10,
+            Self::OwnAppPassword { .. } => 11,
+            Self::OwnDelegations => 12,
+            Self::OwnAudit => 13,
+            Self::Mailboxes => 14,
+            Self::Mailbox { .. } => 15,
+            Self::Messages { .. } => 16,
+            Self::Message { .. } => 17,
+            Self::MessageRaw { .. } => 18,
+            Self::MessagePart { .. } => 19,
+            Self::Changes { .. } => 20,
+            Self::Search { .. } => 21,
+            Self::Copy { .. } => 22,
+            Self::Move { .. } => 23,
+            Self::Drafts => 24,
+            Self::Draft { .. } => 25,
+            Self::DraftAttachments { .. } => 26,
+            Self::DraftAttachment { .. } => 27,
+            Self::DraftSend { .. } => 28,
+            Self::DraftStore { .. } => 29,
+            Self::Submissions => 30,
+            Self::Accounts => 31,
+            Self::Account { .. } => 32,
+            Self::AccountPassword { .. } => 33,
+            Self::AccountAddresses { .. } => 34,
+            Self::Delegates { .. } => 35,
+            Self::Delegate { .. } => 36,
+            Self::AccountDevices { .. } => 37,
+            Self::AccountDevice { .. } => 38,
+            Self::AccountAudit { .. } => 39,
+            Self::Domains => 40,
+            Self::Bans => 41,
+            Self::Ban { .. } => 42,
+            Self::Health => 43,
+            Self::Metrics => 44,
+        }
     }
 }
 

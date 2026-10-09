@@ -16,6 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 ams-api = { workspace = true }
+# `Method` vient de là : le document OpenAPI nomme les verbes que
+# `Resource::allowed` rend, et ce sont les mêmes valeurs que le serveur route.
+ams-proto-http = { workspace = true }
 ams-auth = { workspace = true }
 # `SIGPIPE` : un outil dont la sortie passe dans un tube ne doit pas paniquer
 # quand le lecteur ferme. Rust l'ignore au démarrage ; on rend le défaut d'Unix.

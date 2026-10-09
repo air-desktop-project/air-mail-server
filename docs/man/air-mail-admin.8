@@ -5,7 +5,7 @@
 .\"
 .\" La version du .TH est réécrite à la construction du paquet par
 .\" scripts/paquet.sh : ne la corrigez pas à la main.
-.TH AIR-MAIL-ADMIN 8 "2026-10-09" "air-mail-server 0.2.66" "Administration système"
+.TH AIR-MAIL-ADMIN 8 "2026-10-09" "air-mail-server 0.2.67" "Administration système"
 .
 .SH NOM
 air-mail-admin \- contrôle et configuration d'air-mail-server
@@ -138,6 +138,38 @@ vérité sur ce qu'une machine porte.
 .IP
 .B LE MOT DE PASSE DU RELAIS N'EST PAS AFFICHÉ,
 et le secret de scellement non plus.
+.
+.SS Le contrat de l'API REST
+.TP
+.B openapi
+écrit sur la sortie standard le document
+.B OpenAPI 3.1
+de l'API REST que cette version sert.
+.IP
+.B ELLE NE PREND AUCUN FICHIER,
+et ce n'est pas un oubli : le document ne décrit pas
+.I cette
+installation \(em il ne lit ni écoute, ni domaine, ni magasin \(em mais l'API
+que ce binaire sert. Lui passer un chemin laisserait croire le contraire.
+.IP
+.B IL EST ENGENDRÉ, ET NON ÉCRIT.
+Les chemins, les méthodes servies, les paramètres et la portée exigée par
+opération sont lus sur la table de routage elle-même \(em les mêmes fonctions
+que le serveur interroge pour router et pour autoriser. Un document d'API écrit
+à la main est faux le jour où une route bouge, et personne ne s'en aperçoit.
+.IP
+.B CE QU'IL NE DIT PAS,
+et il le dit de lui-même : les schémas de corps de requête et de réponse, et les
+codes de succès exacts. Ceux-là vivent dans les gestionnaires et non dans la
+table ; les déclarer sans les y lire serait les inventer. Les succès sont donc
+donnés par plage
+.RB ( 2XX ).
+.IP
+Le document commité en
+.I docs/openapi.json
+est celui que cette commande engendre, et
+.I scripts/check-openapi.sh
+l'exige à chaque poussée.
 .
 .SS Comptes
 .TP
