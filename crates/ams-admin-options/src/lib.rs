@@ -136,11 +136,12 @@ pub struct Options {
     /// **ABSENT ÉTEINT TOUT**, comme le relais et comme l'API : on ne s'annonce
     /// pas, et rien n'est dit à un tiers que l'exploitant n'a pas choisi.
     pub asl_state: Option<PathBuf>,
-    /// Ce qu'on annonce : un nom par point d'écoute.
+    /// Ce qu'on annonce : un nom, et le port RÉELLEMENT écouté.
     ///
-    /// Les noms et les ports sont ceux de l'EXPLOITANT, pas ceux des écoutes :
-    /// ce serveur ne connaît pas la redirection qui expose ses ports, et ne peut
-    /// pas la mesurer.
+    /// L'exploitant choisit les NOMS et ce qu'il publie ; le port, lui, est
+    /// celui où ce serveur écoute pour de bon — 9993, et non 993. C'est le
+    /// propos d'ASL : affranchir un daemon des ports privilégiés, donc de la
+    /// convention, en disant à ses clients où il écoute vraiment.
     pub asl_services: Vec<ams_config::AslService>,
     /// Les annuaires à joindre, sous la forme `hôte:port=n-…`.
     ///
@@ -814,16 +815,19 @@ OPTIONS DE `config write`
                         <code>`, avec un code que l'application affiche.
     --asl-announce <nom>=<tcp|udp>:<port>
                         UN SERVICE À ANNONCER, répétable — un nom par point
-                        d'écoute : `air-mail-imaps=tcp:993`.
-                        LE PORT EST CELUI QU'UN CLIENT DOIT JOINDRE, et non
-                        celui que ce serveur a lié. Ce serveur connaît ses
-                        écoutes ; il ne connaît pas la redirection qui les
-                        expose (il ne peut lier aucun port sous 1024), et il ne
-                        peut pas la mesurer. Vous écrivez donc ce qui est
-                        joignable du dehors — et L'ANNUAIRE LE VÉRIFIE : il
-                        sonde chaque point TCP annoncé et rend un verdict. Une
-                        annonce fausse se voit, au lieu de se croire. Un point
-                        UDP ne se sonde pas, et son verdict est `non_sonde`.
+                        d'écoute : `air-mail-imaps=tcp:9993`.
+                        LE PORT EST CELUI OÙ CE SERVEUR ÉCOUTE VRAIMENT, et
+                        non la convention qu'une redirection expose. ASL
+                        existe POUR ÇA : qu'un daemon n'ait plus à être lancé
+                        en `root` pour lier un port sous 1024 — il écoute où
+                        il veut, et l'annuaire dit où. Un client qui résout
+                        par ASL obtient l'adresse ET le vrai port. Annoncer
+                        993 pour une écoute sur 9993 renverrait vers la
+                        redirection `nftables` qu'ASL rend inutile.
+                        L'ANNUAIRE SONDE chaque point TCP annoncé : avec le
+                        vrai port, son verdict porte sur l'écoute et non sur
+                        la redirection. Un point UDP ne se sonde pas, et son
+                        verdict est `non_sonde`.
                         Le nom : minuscules, chiffres, `-`, `_`, `.`, ni `-`
                         ni `.` aux extrémités ; les majuscules sont REFUSÉES,
                         non repliées. `asl-directory` et `asl-echo` sont
@@ -2327,7 +2331,7 @@ fn hote_du_relais(adresse: &str) -> (String, u16) {
 ///
 /// Trois options — un nom, un protocole, un port — devraient se correspondre
 /// par leur ORDRE, et un oubli décalerait tout le reste sans rien dire. Ici, un
-/// service est un mot : `air-mail-imaps=tcp:993`.
+/// service est un mot : `air-mail-imaps=tcp:9993`.
 ///
 /// # CE QUI EST VÉRIFIÉ ICI, ET CE QUI NE L'EST PAS
 ///
@@ -2338,7 +2342,7 @@ fn hote_du_relais(adresse: &str) -> (String, u16) {
 fn lire_une_annonce(brute: &str) -> Result<ams_config::AslService, ArgError> {
     let faute = |quoi: &str| {
         ArgError::new(format!(
-            "`{brute}` ne dit pas un service : {quoi}. La forme est              `<nom>=<tcp|udp>:<port>`, par exemple `air-mail-imaps=tcp:993`"
+            "`{brute}` ne dit pas un service : {quoi}. La forme est              `<nom>=<tcp|udp>:<port>`, par exemple `air-mail-imaps=tcp:9993`"
         ))
     };
 
@@ -2498,9 +2502,9 @@ mod tests {
             "--asl-state",
             "/var/lib/air-mail/asl",
             "--asl-announce",
-            "air-mail-smtp=tcp:25",
+            "air-mail-smtp=tcp:2525",
             "--asl-announce",
-            "air-mail-imaps=tcp:993",
+            "air-mail-imaps=tcp:9993",
             "--asl-announce",
             "air-mail-api-h3=udp:8443",
             "--asl-directory",
@@ -2511,7 +2515,7 @@ mod tests {
         assert_eq!(config.asl.state, "/var/lib/air-mail/asl");
         assert_eq!(config.asl.services.len(), 3);
         assert_eq!(config.asl.services[1].name, "air-mail-imaps");
-        assert_eq!(config.asl.services[1].port, 993);
+        assert_eq!(config.asl.services[1].port, 9993);
         assert_eq!(
             config.asl.services[1].protocol,
             ams_config::AslProtocol::Tcp
@@ -2549,7 +2553,7 @@ mod tests {
                 "mail.example.com",
                 argument,
                 if argument == "--asl-announce" {
-                    "air-mail-smtp=tcp:25"
+                    "air-mail-smtp=tcp:2525"
                 } else {
                     "192.0.2.1:6630=n-0PWT8HZD80QMSPPDZ5CQXXYHQC"
                 },
@@ -2586,7 +2590,7 @@ mod tests {
             ]);
             assert!(dit.contains(attendu), "sur `{brute}` : {dit}");
             assert!(
-                dit.contains("air-mail-imaps=tcp:993"),
+                dit.contains("air-mail-imaps=tcp:9993"),
                 "le refus montre la forme attendue : {dit}"
             );
         }
@@ -2630,9 +2634,9 @@ mod tests {
             "--asl-state",
             "/var/lib/air-mail/asl",
             "--asl-announce",
-            "air-mail-imaps=tcp:993",
-            "--asl-announce",
             "air-mail-imaps=tcp:9993",
+            "--asl-announce",
+            "air-mail-imaps=tcp:4465",
         ]);
         assert!(dit.contains("même nom"), "{dit}");
     }

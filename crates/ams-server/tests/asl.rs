@@ -342,7 +342,7 @@ fn avec_une_fiche_juste_il_annonce_et_dit_quoi() {
                 ams_config::AslService {
                     name: String::from("air-mail-imaps"),
                     protocol: ams_config::AslProtocol::Tcp,
-                    port: 993,
+                    port: 9993,
                 },
                 ams_config::AslService {
                     name: String::from("air-mail-api-h3"),
@@ -361,7 +361,7 @@ fn avec_une_fiche_juste_il_annonce_et_dit_quoi() {
     );
     assert!(dit.contains(machine.texte().as_str()), "{dit}");
     assert!(dit.contains("2 service(s)"), "{dit}");
-    assert!(dit.contains("air-mail-imaps → tcp:993"), "{dit}");
+    assert!(dit.contains("air-mail-imaps → tcp:9993"), "{dit}");
     assert!(dit.contains("air-mail-api-h3 → udp:8443"), "{dit}");
     assert!(
         !dit.contains("racines embarquées"),
