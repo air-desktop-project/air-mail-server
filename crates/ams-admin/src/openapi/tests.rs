@@ -93,7 +93,8 @@ fn chaque_methode_servie_y_figure_et_pas_une_de_plus() {
     for entree in CATALOGUE {
         let tranche = bloc(&document, entree.gabarit);
         for method in VERBES {
-            let attendu = entree.exemplaire.allowed().contains(&method);
+            let attendu =
+                entree.exemplaire.allowed().contains(&method) || matches!(method, Method::Options);
             assert_eq!(
                 tranche.contains(&format!("\"{}\": {{", verbe(method))),
                 attendu,
@@ -106,38 +107,47 @@ fn chaque_methode_servie_y_figure_et_pas_une_de_plus() {
     }
 }
 
-/// `OPTIONS` n'est PAS décrite, et l'en-tête `Allow` non plus.
+/// `OPTIONS` est décrite partout, et son `Allow` porte sa valeur exacte.
 ///
-/// # L'ESSAI QUI DIT CE QUE LE SERVEUR NE FAIT PAS
+/// # L'ESSAI QUI A CHANGÉ DE SENS DEUX FOIS EN UN JOUR
 ///
-/// `Resource::serves` laisse passer `OPTIONS` sur toute ressource qui existe, et
-/// le commentaire de `allowed` annonce « c'est ce qu'on écrit dans `Allow` ».
-/// **Ni l'un ni l'autre n'est honoré** : `champs_ordinaires` n'écrit jamais
-/// `allow`, et une requête `OPTIONS` tombe sur le `_ => pas_encore`
-/// d'`ams-server::api`, qui rend 501.
+/// Il exigeait d'abord la présence d'`OPTIONS`, sur la foi de deux commentaires
+/// de `route.rs`. Une requête a montré **501** et aucun en-tête : il a été
+/// retourné pour en exiger l'ABSENCE. Puis la session a servi `OPTIONS` et les
+/// deux conducteurs ont porté l'`Allow` jusqu'au fil — et il exige de nouveau
+/// leur présence.
 ///
-/// Le document avait d'abord décrit les deux, sur la foi de ces commentaires.
-/// C'était le mensonge que ce module existe pour éviter, et c'est cet essai qui
-/// le tient fermé : le jour où le serveur les servira, il échouera, et il
-/// faudra le réécrire en même temps que le document.
+/// Ce qui a décidé, chaque fois, c'est ce qu'une requête montre. Jamais ce qu'un
+/// commentaire affirme.
 #[test]
-fn options_et_allow_ne_sont_pas_decrits() {
+fn options_est_decrite_avec_son_allow() {
     let document = document();
     for entree in CATALOGUE {
         let tranche = bloc(&document, entree.gabarit);
         assert!(
-            !tranche.contains("\"options\": {"),
-            "{} : OPTIONS est décrite alors que le serveur rend 501",
+            tranche.contains("\"options\": {"),
+            "{} : OPTIONS n'est pas décrite",
+            entree.gabarit
+        );
+        // La valeur exacte, celle que la session écrit.
+        let mut place = [0_u8; ams_api::ALLOW_OCTETS_MAX];
+        let permises = entree.exemplaire.allow(&mut place);
+        let attendu = core::str::from_utf8(permises).expect("de l'ASCII");
+        assert!(
+            tranche.contains(&format!("\"const\": \"{attendu}\"")),
+            "{} : l'`Allow` annoncé n'est pas {attendu:?}",
+            entree.gabarit
+        );
+        assert!(
+            attendu.ends_with("OPTIONS"),
+            "{} : `Allow` devrait nommer OPTIONS",
             entree.gabarit
         );
     }
+    // Le refus porte l'en-tête aussi, sans valeur : elle dépend du chemin.
     assert!(
-        !document.contains("\"Allow\""),
-        "`Allow` est déclaré alors qu'aucune réponse ne le porte"
-    );
-    assert!(
-        document.contains("aucun gestionnaire ne l'honore"),
-        "le document devrait dire pourquoi OPTIONS n'y est pas"
+        document.contains("\"Allow\": {"),
+        "le refus devrait déclarer l'en-tête `Allow`"
     );
 }
 

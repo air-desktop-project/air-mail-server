@@ -6368,6 +6368,80 @@ sécurité tient à l'ORDRE des contrôles, et l'ordre ne se lit pas dans la tab
 qui les nomme — il se lit dans la fonction qui les appelle, ailleurs, dans une
 autre crate.
 
+## L'`Allow` de ce `405` n'existait pas, et `OPTIONS` rendait `501`
+
+La table ci-dessus écrit « **405** + `Allow` », et le commentaire de
+`Resource::allowed` annonce depuis l'origine : « **c'est ce qu'on écrit dans
+`Allow`**, et §15.5.6 de RFC 9110 en fait une obligation sur un 405 ». Celui de
+`resolve` ajoute : « `OPTIONS` s'applique à toute ressource qui existe (§9.3.7)
+».
+
+**AUCUN DES DEUX N'ÉTAIT TENU**, et cela a vécu jusqu'au 2026-10-09 :
+
+- `champs_ordinaires` d'`ams-session` énumère ce que TOUTE réponse porte —
+  `no-store`, `nosniff`, `www-authenticate` sur un 401, `alt-svc`. **`allow` n'y
+  figurait pour aucun statut.**
+- `Resource::serves` rend `true` pour `OPTIONS`, donc la requête échappait au
+  `405` ; puis aucun bras du dispatch d'`ams-server::api` ne la reconnaissait, et
+  elle tombait sur son `_ => pas_encore` : **`501`**. Le routeur disait oui,
+  l'application disait « pas encore ».
+
+### Comment cela s'est vu, et pourquoi pas plus tôt
+
+En engendrant le document OpenAPI. Il décrit les méthodes servies en lisant
+`allowed`, et il a donc décrit `OPTIONS` sur les quarante-cinq chemins et
+l'en-tête `Allow` sur les refus — **sur la foi de ces commentaires**. Une requête
+`curl -X OPTIONS` sur le banc d'intégration a rendu ceci :
+
+```text
+HTTP/2 204
+content-type: application/problem+json
+cache-control: no-store
+x-content-type-options: nosniff
+```
+
+Trois choses d'un coup. Pas d'`allow`. Un `content-type` de document d'erreur sur
+une réponse vide. Et un `204` qui venait de la correction en cours, non du code
+d'avant — lequel rendait `501`.
+
+**CE QUI A MASQUÉ LA FAUTE SI LONGTEMPS EST UN ACCESSEUR QUE SEULS LES ESSAIS
+LISAIENT.** `Turn::fields` n'était appelé par AUCUN code de production : les deux
+conducteurs rebâtissaient leur liste de champs, et celui d'HTTP/2 écrivait
+`PROBLEM_MEDIA_TYPE` pour tout `Next::Respond`. Les essais de session
+vérifiaient donc consciencieusement un jeu de champs que le fil ne voyait jamais.
+
+### Ce qui a été fait
+
+`Resource::allow` écrit la valeur de l'en-tête — `allowed`, plus `OPTIONS`, qui
+y figure puisqu'elle est servie — sans allouer et sans jamais couper un nom en
+deux. La session la pose sur le `405` et sur la réponse à `OPTIONS`, qu'elle
+répond elle-même par un `204` sans corps : la table de routage est encore sous la
+main, et il n'y a aucun magasin à consulter.
+
+`Turn` gagne `media()` et `allow()`, et **les deux conducteurs les lisent au lieu
+de deviner** : le type ne vient plus d'une supposition sur `Next::Respond`, et une
+réponse sans corps n'annonce plus de type. C'est la troisième fois que ces deux
+composeurs divergent, et la troisième fois que le remède est le même — une seule
+source, que les deux lisent.
+
+### Ce qui n'a PAS changé, et c'est voulu
+
+`OPTIONS` **exige un jeton**, comme le reste. `Allow` dit quelles méthodes
+existent sur un chemin : le rendre à un inconnu referait de ce routeur l'annuaire
+public que la section précédente a fermé. Un sondage préalable CORS, lui, est par
+définition sans identifiant — il recevra donc `401`, et **ouvrir CORS demandera
+de trancher cela**, soit par une réponse de sondage qui ne révèle rien de la
+ressource, soit en traitant le sondage avant l'autorisation. Ce n'est pas un
+effet de bord à subir ici.
+
+### La leçon, écrite pour la prochaine fois
+
+Trois commentaires affirmaient un comportement ; trois essais vérifiaient une
+structure interne ; une seule requête a montré la vérité. **Ce qui prouve qu'un
+en-tête part, c'est une réponse lue sur le fil** — et c'est pourquoi l'assertion
+qui garde cette tranche vit dans `crates/ams-server/tests/api.rs`, derrière un
+vrai `curl`, et non dans les essais de la session.
+
 ## POP3 répondait deux fois au `PASS`, et ne servait donc aucun client conforme
 
 Le 2026-09-05, `poplib` — le client POP3 de la bibliothèque standard de Python —

@@ -28,12 +28,16 @@
 #      servie, des `operationId` distincts, et toutes les références internes
 #      qui aboutissent.
 #
-# **ELLE EXIGE AUSSI QUE `OPTIONS` N'Y SOIT PAS.** `Resource::serves` la laisse
-# passer, et le commentaire d'`allowed` annonce un en-tête `Allow` — mais aucun
-# gestionnaire ne l'honore et `champs_ordinaires` ne l'écrit jamais : une requête
-# `OPTIONS` rend 501. Le document avait d'abord décrit les deux, sur la foi de ces
-# commentaires ; c'était le mensonge que tout ceci existe pour éviter. Le jour où
-# le serveur les servira, cette barrière échouera, et ce sera le bon moment.
+# **ELLE EXIGE AUSSI QU'`OPTIONS` Y SOIT, AVEC LA VALEUR DE SON `Allow`**, et
+# que cette valeur soit celle que le document décrit : les verbes annoncés dans
+# `Allow` doivent être exactement les opérations décrites sous ce chemin.
+#
+# Cette exigence a été retournée deux fois en un jour, et c'est son histoire qui
+# la justifie. Le document avait d'abord décrit `OPTIONS` et `Allow` sur la foi
+# de deux commentaires de `route.rs` ; une requête a montré 501 et aucun en-tête,
+# et la barrière a exigé leur ABSENCE. Puis le serveur les a servis — et elle
+# exige leur présence. Ce qui change, chaque fois, c'est ce qu'une requête
+# montre, jamais ce qu'un commentaire affirme.
 #
 # **ELLE N'APPELLE AUCUN VALIDEUR EXTERNE.** `npx @redocly/cli lint` dit « valid »
 # sur ce document, et c'est ainsi qu'il a été éprouvé — mais une barrière qui
@@ -136,15 +140,35 @@ for chemin_api, bloc in document["paths"].items():
     )
     verbes = {cle for cle in bloc if cle in VERBES}
     exiger(bool(verbes), f"{chemin_api} ne sert aucune méthode")
-    # **OPTIONS NE DOIT PAS Y ÊTRE, ET C'EST MESURÉ.** `Resource::serves` la
-    # laisse passer (§9.3.7 la veut sur toute ressource qui existe), mais aucun
-    # gestionnaire ne l'honore : la requête tombe sur le `_ => pas_encore`
-    # d'`ams-server::api` et rend 501. Le jour où le serveur la servira, c'est
-    # cette ligne qu'il faudra retourner — en même temps que le document.
-    exiger(
-        "options" not in verbes,
-        f"{chemin_api} décrit OPTIONS, que le serveur ne sert pas (501)",
+    # **OPTIONS DOIT Y ÊTRE, DEPUIS QU'ELLE EST SERVIE** (§9.3.7), et la valeur
+    # exacte de son `Allow` avec elle : elle se lit sur `Resource::allow`, celle
+    # que la session écrit. Cette ligne a été retournée deux fois — une fois pour
+    # retirer une opération que le serveur ne servait pas, une fois pour la
+    # remettre quand une requête a montré le 204.
+    exiger("options" in verbes, f"{chemin_api} ne décrit pas OPTIONS")
+    options = bloc.get("options", {})
+    permises = (
+        options.get("responses", {})
+        .get("204", {})
+        .get("headers", {})
+        .get("Allow", {})
+        .get("schema", {})
+        .get("const")
     )
+    exiger(
+        bool(permises),
+        f"{chemin_api} : la réponse à OPTIONS ne donne pas la valeur de son Allow",
+    )
+    if permises:
+        annoncees = permises.split(", ")
+        exiger(
+            annoncees[-1] == "OPTIONS",
+            f"{chemin_api} : Allow ne nomme pas OPTIONS, qui est pourtant servie",
+        )
+        exiger(
+            {nom.lower() for nom in annoncees} == verbes,
+            f"{chemin_api} : Allow dit {sorted(annoncees)}, le document décrit {sorted(verbes)}",
+        )
     for verbe in verbes:
         operations += 1
         operation = bloc[verbe]

@@ -40,6 +40,13 @@ use crate::scope::{Area, Rights, Scope};
 /// La version d'API que porte le chemin.
 pub const VERSION: &str = "v1";
 
+/// De quoi écrire la valeur d'`Allow` la plus longue, avec de la marge.
+///
+/// `GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS` fait quarante-quatre octets.
+/// Aucune ressource ne sert les sept, mais la borne ne se calcule pas sur ce
+/// qu'on sert aujourd'hui — elle se calcule sur ce que le type peut produire.
+pub const ALLOW_OCTETS_MAX: usize = 64;
+
 /// Ce qu'un chemin désigne.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resource<'o> {
@@ -551,6 +558,68 @@ impl Resource<'_> {
             }
             _ => requete.is_empty(),
         }
+    }
+
+    /// Écrit la valeur de l'en-tête `Allow` de cette ressource dans `place`.
+    ///
+    /// # §15.5.6 DE RFC 9110 EN FAIT UNE OBLIGATION SUR UN 405
+    ///
+    /// « The origin server MUST generate an Allow header field in a 405
+    /// response ». Sans lui, un client qui reçoit 405 sait qu'il s'est trompé
+    /// mais pas de quoi — et réessaiera le chemin ET le verbe, ce qui double le
+    /// trafic pour rien.
+    ///
+    /// Le commentaire d'[`Self::allowed`] annonçait « c'est ce qu'on écrit dans
+    /// `Allow` » depuis l'origine. **RIEN NE L'ÉCRIVAIT** : `champs_ordinaires`
+    /// d'`ams-session` énumère ce que toute réponse porte, et `allow` n'y était
+    /// pas, pour aucun statut. L'intention était juste, et tenue par personne.
+    ///
+    /// # `OPTIONS` Y FIGURE, ET [`Self::allowed`] NE LA LISTE PAS
+    ///
+    /// Les deux sont vrais en même temps, et ce n'est pas une incohérence.
+    /// `allowed` dit les droits qu'on a SUR la ressource ; `OPTIONS` n'en est
+    /// pas un, c'est le moyen de demander lesquels le sont (§9.3.7). Mais
+    /// `Allow` énumère ce qu'on peut ENVOYER, et `OPTIONS` en fait partie
+    /// puisqu'elle est servie : l'omettre dirait à un client de ne pas poser la
+    /// question à laquelle on vient de répondre.
+    ///
+    /// # ELLE N'ALLOUE PAS, ET ELLE NE TRONQUE PAS EN SILENCE
+    ///
+    /// La valeur la plus longue que cette API puisse produire fait
+    /// quarante-quatre octets ; [`ALLOW_OCTETS_MAX`] en réserve davantage. Si
+    /// `place` ne suffisait pourtant pas, ce qui est écrit s'arrête sur une
+    /// méthode entière — jamais au milieu d'un nom, qui donnerait un en-tête
+    /// qu'un client lirait de travers.
+    #[must_use]
+    pub fn allow(self, place: &mut [u8]) -> &[u8] {
+        let mut ecrit = 0_usize;
+        for method in self
+            .allowed()
+            .iter()
+            .copied()
+            .chain(core::iter::once(Method::Options))
+        {
+            let nom = method.as_bytes();
+            // **UNE SEULE VÉRIFICATION DE BORNES, ET C'EST LA GARDE.** Deux
+            // `if let Some(…)` successifs en faisaient trois, dont deux que la
+            // première rendait inatteignables : du code défensif que rien ne
+            // pouvait éprouver, et que C2 compte comme non couvert à juste
+            // titre — une branche qu'aucun essai n'atteint est une branche dont
+            // personne ne sait ce qu'elle fait.
+            let separe: &[u8] = match ecrit {
+                0 => b"",
+                _ => b", ",
+            };
+            let fin = ecrit.saturating_add(separe.len()).saturating_add(nom.len());
+            let Some(cible) = place.get_mut(ecrit..fin) else {
+                break;
+            };
+            let (devant, derriere) = cible.split_at_mut(separe.len().min(cible.len()));
+            devant.copy_from_slice(separe);
+            derriere.copy_from_slice(nom);
+            ecrit = fin;
+        }
+        place.get(..ecrit).unwrap_or_default()
     }
 
     /// Son rang dans [`crate::catalogue::CATALOGUE`].

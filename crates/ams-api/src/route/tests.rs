@@ -1108,3 +1108,113 @@ fn les_parametres_de_requete_admis() {
         }
     }
 }
+
+/// La valeur d'`Allow`, par ressource.
+fn allow(resource: Resource<'_>) -> std::string::String {
+    let mut place = [0_u8; super::ALLOW_OCTETS_MAX];
+    let ecrit = resource.allow(&mut place);
+    std::string::String::from_utf8(ecrit.to_vec()).expect("les noms de méthode sont de l'ASCII")
+}
+
+/// `Allow` énumère les méthodes servies, `OPTIONS` comprise.
+///
+/// **ELLE N'EST PAS DANS `allowed`, ET ELLE EST DANS `Allow`.** Les deux sont
+/// vrais : `allowed` dit les droits qu'on a sur la ressource, `Allow` dit ce
+/// qu'on peut envoyer — et `OPTIONS` est servie.
+#[test]
+fn allow_enumere_les_methodes_servies() {
+    assert_eq!(allow(Resource::Health), "GET, HEAD, OPTIONS");
+    assert_eq!(allow(Resource::Tokens), "POST, OPTIONS");
+    assert_eq!(allow(Resource::CurrentToken), "DELETE, OPTIONS");
+    assert_eq!(
+        allow(Resource::Mailbox { boite: "INBOX" }),
+        "GET, HEAD, PUT, DELETE, OPTIONS"
+    );
+    assert_eq!(
+        allow(Resource::Message {
+            boite: "INBOX",
+            uid: 1
+        }),
+        "GET, HEAD, PATCH, DELETE, OPTIONS"
+    );
+    assert_eq!(
+        allow(Resource::DraftAttachment { id: "br", piece: 1 }),
+        "PUT, DELETE, OPTIONS"
+    );
+}
+
+/// `Allow` dit exactement ce que `allowed` dit, plus `OPTIONS`, pour TOUTES.
+///
+/// L'essai qui vaut : il ne cite aucune valeur, il compare les deux sources.
+#[test]
+fn allow_et_allowed_disent_la_meme_chose() {
+    for entree in crate::catalogue::CATALOGUE {
+        let rendu = allow(entree.exemplaire);
+        let noms: std::vec::Vec<&str> = rendu.split(", ").collect();
+        let attendues: std::vec::Vec<&str> = entree
+            .exemplaire
+            .allowed()
+            .iter()
+            .map(|method| core::str::from_utf8(method.as_bytes()).expect("de l'ASCII"))
+            .chain(core::iter::once("OPTIONS"))
+            .collect();
+        assert_eq!(
+            noms, attendues,
+            "{} : `Allow` et `allowed` divergent",
+            entree.gabarit
+        );
+        // Et chaque méthode nommée est bien servie.
+        for nom in &noms {
+            let method = Method::parse(nom.as_bytes()).expect("un nom connu");
+            assert!(
+                entree.exemplaire.serves(method),
+                "{} : `Allow` nomme {nom}, que la ressource ne sert pas",
+                entree.gabarit
+            );
+        }
+    }
+}
+
+/// `ALLOW_OCTETS_MAX` suffit à la plus longue valeur possible.
+#[test]
+fn allow_octets_max_suffit() {
+    let plus_longue = crate::catalogue::CATALOGUE
+        .iter()
+        .map(|entree| allow(entree.exemplaire).len())
+        .max()
+        .expect("le catalogue n'est pas vide");
+    assert!(
+        plus_longue < super::ALLOW_OCTETS_MAX,
+        "la plus longue valeur fait {plus_longue} octets"
+    );
+    // Les sept méthodes à la fois — ce qu'aucune ressource ne sert, mais ce que
+    // la borne doit porter.
+    assert!(
+        "GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS".len() < super::ALLOW_OCTETS_MAX,
+        "la borne ne porte pas les sept"
+    );
+}
+
+/// Un tampon trop court s'arrête sur une méthode ENTIÈRE.
+///
+/// Un nom coupé en deux donnerait un en-tête qu'un client lirait de travers —
+/// « DELE » est une méthode qui n'existe pas, et il la croirait servie.
+#[test]
+fn allow_ne_coupe_jamais_un_nom() {
+    let resource = Resource::Mailbox { boite: "INBOX" };
+    for taille in 0..="GET, HEAD, PUT, DELETE, OPTIONS".len() {
+        let mut place = std::vec![0_u8; taille];
+        let ecrit = resource.allow(&mut place);
+        let rendu = core::str::from_utf8(ecrit).expect("de l'ASCII");
+        assert!(
+            !rendu.ends_with(',') && !rendu.ends_with(' '),
+            "{taille} : la valeur finit sur un séparateur : {rendu:?}"
+        );
+        for nom in rendu.split(", ").filter(|nom| !nom.is_empty()) {
+            assert!(
+                Method::parse(nom.as_bytes()).is_some(),
+                "{taille} : {nom:?} n'est pas une méthode entière"
+            );
+        }
+    }
+}

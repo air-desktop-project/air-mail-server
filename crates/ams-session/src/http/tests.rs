@@ -2085,3 +2085,251 @@ fn une_partie_porte_sa_disposition_et_sa_politique() {
         ]
     );
 }
+
+// ── `OPTIONS` ET `Allow` ────────────────────────────────────────────────────
+
+/// La valeur d'un champ de la réponse, s'il y est.
+fn champ(tour: &super::Turn<'_>, nom: &[u8]) -> Option<std::string::String> {
+    tour.fields()
+        .find(|(candidat, _)| *candidat == nom)
+        .map(|(_, valeur)| std::string::String::from_utf8_lossy(valeur).into_owned())
+}
+
+/// Mène une requête et rend le tour.
+fn tour_de<'p>(
+    methode: &[u8],
+    chemin: &[u8],
+    porte: &[u8],
+    place: &'p mut [u8],
+    session: &'p Http,
+) -> super::Turn<'p> {
+    let champs = requete(methode, chemin, porte);
+    let tete = entete(&champs);
+    session.request(&tete, &[], MAINTENANT, place)
+}
+
+/// **`OPTIONS` SE RÉPOND, ET NE DESCEND PLUS DANS L'APPLICATION.**
+///
+/// Elle y rendait 501 : `Resource::serves` la laissait passer, et aucun bras du
+/// dispatch ne la reconnaissait. Elle rend maintenant 204 avec son `Allow`.
+#[test]
+fn options_rend_204_et_son_allow() {
+    let porte = jeton("marc", Scope::one(Area::Observe, Rights::Read));
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = tour_de(
+        b"OPTIONS",
+        b"/v1/health",
+        porte.as_bytes(),
+        &mut place,
+        &session,
+    );
+    assert_eq!(tour.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        champ(&tour, b"allow").as_deref(),
+        Some("GET, HEAD, OPTIONS")
+    );
+    // §15.3.5 de RFC 9110 : un 204 ne porte JAMAIS de contenu.
+    assert!(tour.body().is_empty(), "un 204 ne porte pas de corps");
+    assert!(
+        champ(&tour, b"content-type").is_none(),
+        "un 204 sans corps n'annonce pas de type"
+    );
+}
+
+/// `Allow` dit ce que la ressource sert, et il change avec elle.
+#[test]
+fn allow_suit_la_ressource() {
+    let porte = jeton("marc", Scope::one(Area::Mail, Rights::Read));
+    for (chemin, attendu) in [
+        (&b"/v1/mailboxes"[..], "GET, HEAD, OPTIONS"),
+        (b"/v1/mailboxes/INBOX", "GET, HEAD, PUT, DELETE, OPTIONS"),
+        (b"/v1/mailboxes/INBOX/messages", "GET, HEAD, POST, OPTIONS"),
+        (b"/v1/mailboxes/INBOX/search", "POST, OPTIONS"),
+    ] {
+        let mut place = [0_u8; PLACE];
+        let session = une_session();
+        let tour = tour_de(b"OPTIONS", chemin, porte.as_bytes(), &mut place, &session);
+        assert_eq!(tour.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            champ(&tour, b"allow").as_deref(),
+            Some(attendu),
+            "{}",
+            texte(chemin)
+        );
+    }
+}
+
+/// **UN 405 PORTE SON `Allow`**, et §15.5.6 de RFC 9110 en fait une obligation.
+///
+/// Sans lui, un client sait qu'il s'est trompé mais pas de quoi — et réessaiera
+/// le chemin ET le verbe.
+#[test]
+fn un_405_porte_son_allow() {
+    let porte = jeton("marc", Scope::one(Area::Mail, Rights::Write));
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    // `/v1/mailboxes` ne se lit que ; un `POST` n'y va pas.
+    let tour = tour_de(
+        b"POST",
+        b"/v1/mailboxes",
+        porte.as_bytes(),
+        &mut place,
+        &session,
+    );
+    assert_eq!(tour.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        champ(&tour, b"allow").as_deref(),
+        Some("GET, HEAD, OPTIONS")
+    );
+    // Le document de refus reste du `problem+json`.
+    assert!(
+        champ(&tour, b"content-type")
+            .as_deref()
+            .is_some_and(|type_| type_.contains("problem+json")),
+        "un refus se dit en problem+json"
+    );
+    assert!(texte(tour.body()).contains("method-not-allowed"));
+}
+
+/// Le 405 d'une PORTE D'ENTRÉE porte son `Allow` aussi.
+///
+/// `/v1/tokens` n'exige aucune portée, et son verbe se juge tout de même : son
+/// refus passe par l'autre branche de `decider`, qui l'oubliait.
+#[test]
+fn un_405_de_porte_d_entree_porte_son_allow() {
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = tour_de(b"GET", b"/v1/tokens", b"", &mut place, &session);
+    assert_eq!(tour.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(champ(&tour, b"allow").as_deref(), Some("POST, OPTIONS"));
+}
+
+/// **`OPTIONS` EXIGE UN JETON, COMME LE RESTE.**
+///
+/// `Allow` dit quelles méthodes existent sur un chemin : le rendre à un inconnu
+/// ferait de ce routeur un annuaire public, ce que le point 5 de `decider`
+/// refuse exprès. C'est aussi pourquoi un sondage CORS — sans identifiant —
+/// recevra 401, et pourquoi ouvrir CORS demandera une décision.
+#[test]
+fn options_sans_jeton_est_refusee() {
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = tour_de(b"OPTIONS", b"/v1/mailboxes", b"", &mut place, &session);
+    assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        champ(&tour, b"allow").is_none(),
+        "un refus d'autorisation ne dit pas ce que la ressource sert"
+    );
+}
+
+/// `OPTIONS` sur une porte d'entrée n'exige rien, et rend son `Allow`.
+#[test]
+fn options_sur_une_porte_d_entree_passe_sans_jeton() {
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = tour_de(b"OPTIONS", b"/v1/tokens", b"", &mut place, &session);
+    assert_eq!(tour.status(), StatusCode::NO_CONTENT);
+    assert_eq!(champ(&tour, b"allow").as_deref(), Some("POST, OPTIONS"));
+}
+
+/// `OPTIONS` sur un chemin qui n'existe pas rend 404, et non 204.
+///
+/// §9.3.7 ne s'applique qu'aux ressources QUI EXISTENT ; répondre 204 sur un
+/// chemin inconnu dirait qu'il existe.
+#[test]
+fn options_sur_un_chemin_inconnu_rend_404() {
+    let porte = jeton("marc", Scope::one(Area::Mail, Rights::Read));
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = tour_de(
+        b"OPTIONS",
+        b"/v1/inconnu",
+        porte.as_bytes(),
+        &mut place,
+        &session,
+    );
+    assert_eq!(tour.status(), StatusCode::NOT_FOUND);
+    assert!(champ(&tour, b"allow").is_none());
+}
+
+/// **LES ACCESSEURS QUE LES CONDUCTEURS LISENT**, éprouvés ici.
+///
+/// # POURQUOI CET ESSAI EXISTE
+///
+/// `Turn::fields` n'était lu par AUCUN code de production : les deux conducteurs
+/// rebâtissaient leur liste, et celui d'HTTP/2 écrivait `PROBLEM_MEDIA_TYPE` pour
+/// toute réponse. Un `204` d'`OPTIONS` partait donc avec un `content-type` qui ne
+/// décrivait rien, et l'`Allow` ne partait pas du tout — alors que les essais de
+/// cette session, qui lisaient `fields`, passaient.
+///
+/// `media` et `allow` sont ce que les conducteurs lisent désormais. Les éprouver
+/// ici, c'est éprouver ce qui part sur le fil.
+#[test]
+fn le_tour_dit_son_type_et_son_allow() {
+    let porte = jeton("marc", Scope::one(Area::Observe, Rights::Read));
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+
+    // La réponse à `OPTIONS` : un `Allow`, et AUCUN type.
+    let tour = tour_de(
+        b"OPTIONS",
+        b"/v1/health",
+        porte.as_bytes(),
+        &mut place,
+        &session,
+    );
+    assert_eq!(tour.allow(), b"GET, HEAD, OPTIONS");
+    assert_eq!(tour.media(), "", "un 204 sans corps n'annonce pas de type");
+
+    // Un refus de méthode : les deux.
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = tour_de(
+        b"POST",
+        b"/v1/health",
+        porte.as_bytes(),
+        &mut place,
+        &session,
+    );
+    assert_eq!(tour.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(tour.allow(), b"GET, HEAD, OPTIONS");
+    assert_eq!(tour.media(), super::PROBLEM_MEDIA_TYPE);
+
+    // Un refus ordinaire : un type, et pas d'`Allow`.
+    let mut place = [0_u8; PLACE];
+    let session = une_session();
+    let tour = tour_de(b"GET", b"/v1/health", b"", &mut place, &session);
+    assert_eq!(tour.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(tour.media(), super::PROBLEM_MEDIA_TYPE);
+    assert!(
+        tour.allow().is_empty(),
+        "un refus d'autorisation ne dit pas ce que la ressource sert"
+    );
+}
+
+/// **LE TAMPON TROP COURT GARDE L'`Allow`**, et perd le document.
+///
+/// Un refus dont le corps ne tient pas part tout de même avec son code et son
+/// en-tête : c'est ce qui reste utile. Le même repli que `refus`, qui rend le
+/// code seul.
+#[test]
+fn un_405_sans_place_pour_son_document_garde_son_allow() {
+    let resource = ams_api::Resource::Health;
+    // De quoi écrire l'`Allow`, et rien de plus : le document ne tient pas.
+    let mut place = [0_u8; ams_api::ALLOW_OCTETS_MAX];
+    let tour = super::methode_refusee(b"", resource, &mut place);
+    assert_eq!(tour.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(tour.allow(), b"GET, HEAD, OPTIONS");
+    assert!(tour.body().is_empty(), "le document n'a pas tenu");
+    assert_eq!(tour.media(), "", "sans corps, aucun type n'est annoncé");
+}
+
+/// Et l'`Allow` lui-même s'arrête sur une méthode entière quand la place manque.
+#[test]
+fn un_allow_sans_place_ne_coupe_pas_un_nom() {
+    let resource = ams_api::Resource::Health;
+    let mut place = [0_u8; 4];
+    let tour = super::methode_refusee(b"", resource, &mut place);
+    assert_eq!(tour.allow(), b"GET", "seule la première méthode tient");
+}

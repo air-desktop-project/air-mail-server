@@ -333,6 +333,43 @@ impl<'o> Turn<'o> {
         self.fields.iter().flatten().copied()
     }
 
+    /// La valeur de ce champ, s'il y est.
+    fn field(&self, nom: &[u8]) -> Option<&'o [u8]> {
+        self.fields()
+            .find(|(candidat, _)| *candidat == nom)
+            .map(|(_, valeur)| valeur)
+    }
+
+    /// Le type de contenu que cette réponse annonce, **vide s'il n'y en a pas**.
+    ///
+    /// # LES DEUX CONDUCTEURS LE DEVINAIENT, ET SE TROMPAIENT
+    ///
+    /// Chacun écrivait `PROBLEM_MEDIA_TYPE` pour tout `Next::Respond`, sur la
+    /// foi que seule une faute passe par là. C'était vrai jusqu'au jour où
+    /// `OPTIONS` a rendu un `204` sans corps : il partait avec
+    /// `content-type: application/problem+json` sur une réponse vide.
+    ///
+    /// Le type est dans [`Self::fields`] depuis toujours — `champs_ordinaires`
+    /// l'y met — et personne ne l'y lisait. **UN ACCESSEUR QUE SEULS LES ESSAIS
+    /// CONSOMMENT DONNE UNE FAUSSE ASSURANCE** : ils vérifiaient un jeu de
+    /// champs que le fil ne voyait pas.
+    #[must_use]
+    pub fn media(&self) -> &'o str {
+        self.field(EN_TETE_TYPE)
+            .and_then(|valeur| core::str::from_utf8(valeur).ok())
+            .unwrap_or_default()
+    }
+
+    /// La valeur d'`Allow`, **vide s'il n'y en a pas**.
+    ///
+    /// §15.5.6 de RFC 9110 l'exige sur un `405`, et §9.3.7 sur la réponse à
+    /// `OPTIONS`. Les deux la posent dans [`Self::fields`] ; les conducteurs la
+    /// lisent ici.
+    #[must_use]
+    pub fn allow(&self) -> &'o [u8] {
+        self.field(EN_TETE_ALLOW).unwrap_or_default()
+    }
+
     /// Le corps.
     #[must_use]
     pub const fn body(&self) -> &'o [u8] {
@@ -546,7 +583,23 @@ impl Http {
             // en obtient une. Son verbe se juge quand même : sans cela, un
             // `GET /v1/tokens` entrerait dans l'échange de jeton.
             if !resolu.serves {
-                return Err((Reason::MethodNotAllowed, place_de_la_reponse));
+                return Ok(methode_refusee(
+                    self.alt_svc(),
+                    resolu.resource,
+                    place_de_la_reponse,
+                ));
+            }
+            // **`OPTIONS` SE RÉPOND AVANT L'ÉCHANGE**, et il faut le dire ici
+            // aussi : sans cela, elle descendait dans la porte d'entrée, qui
+            // cherchait des identifiants dans un corps qu'`OPTIONS` n'a pas, et
+            // rendait 401. Une porte publique qui refuse de dire ce qu'elle
+            // sert n'aurait aucun secret à garder — son existence est connue.
+            if matches!(resolu.method, Method::Options) {
+                return Ok(methodes_servies(
+                    self.alt_svc(),
+                    resolu.resource,
+                    place_de_la_reponse,
+                ));
             }
             // **LE TYPE DU CORPS SE VÉRIFIE ICI AUSSI**, et il n'y a rien à
             // cacher en le faisant : cette ressource-ci est la porte publique,
@@ -595,7 +648,23 @@ impl Http {
 
         // 6. Le verbe, maintenant qu'on a le droit d'apprendre qu'il ne va pas.
         if !resolu.serves {
-            return Err((Reason::MethodNotAllowed, place_de_la_reponse));
+            return Ok(methode_refusee(
+                self.alt_svc(),
+                resolu.resource,
+                place_de_la_reponse,
+            ));
+        }
+
+        // 6 bis. `OPTIONS` SE RÉPOND ICI, et ne descend pas dans l'application :
+        //        aucun de ses bras ne la reconnaît, et elle y rendrait 501. Ce
+        //        qu'elle demande — les méthodes servies — est dans la table de
+        //        routage, sous la main, et ne dépend d'aucun magasin.
+        if matches!(resolu.method, Method::Options) {
+            return Ok(methodes_servies(
+                self.alt_svc(),
+                resolu.resource,
+                place_de_la_reponse,
+            ));
         }
 
         // 7. Le type du corps, maintenant qu'on sait ce qu'il alimente.
@@ -888,6 +957,12 @@ fn decimales(valeur: u16, out: &mut [u8; 5]) -> usize {
 
 /// Le nom du champ qui porte le type d'un contenu.
 const EN_TETE_TYPE: &[u8] = b"content-type";
+
+/// Le nom de l'en-tête `Allow`.
+///
+/// **EN MINUSCULES** : §8.1.2 de RFC 9113 et §4.1.1 de RFC 9114 l'exigent, et
+/// une capitale ici serait une erreur de protocole sur les deux transports.
+const EN_TETE_ALLOW: &[u8] = b"allow";
 
 /// Ce qu'un nom d'appareil peut faire de long, une fois déséchappé.
 ///
@@ -1262,6 +1337,97 @@ fn champs_ordinaires<'o>(
         *place = Some(champ);
     }
     champs
+}
+
+/// Le refus d'une méthode, **avec son `Allow`**.
+///
+/// # §15.5.6 DE RFC 9110 EN FAIT UNE OBLIGATION
+///
+/// « The origin server MUST generate an Allow header field in a 405 response ».
+/// Ce serveur ne le faisait pas : `champs_ordinaires` énumère ce que toute
+/// réponse porte, et `allow` n'y figurait pour aucun statut. Un client recevait
+/// donc 405 sans savoir quoi essayer.
+///
+/// **IL N'Y A RIEN À CACHER ICI**, et c'est ce qui rend ce champ possible : ce
+/// refus n'arrive qu'APRÈS l'autorisation (point 5 de `decider`), pour la raison
+/// que son commentaire explique. Celui qui le lit a déjà le droit d'apprendre ce
+/// que la ressource sert.
+fn methode_refusee<'o>(
+    alt_svc: &'o [u8],
+    resource: Resource<'_>,
+    sortie: &'o mut [u8],
+) -> Turn<'o> {
+    let status = Reason::MethodNotAllowed.status();
+    let (place_de_l_allow, place_du_document) = couper(sortie, ams_api::ALLOW_OCTETS_MAX);
+    let permises = resource.allow(place_de_l_allow);
+    match problem(Reason::MethodNotAllowed, place_du_document) {
+        Ok(corps) => Turn {
+            status,
+            fields: champs_ordinaires(
+                status,
+                alt_svc,
+                &[
+                    (EN_TETE_TYPE, PROBLEM_MEDIA_TYPE.as_bytes()),
+                    (EN_TETE_ALLOW, permises),
+                ],
+            ),
+            body: corps,
+            next: Next::Respond,
+        },
+        // Le tampon ne suffit pas pour dire la faute : le code et l'`Allow`
+        // partent seuls. C'est le même repli que `refus`, et il garde ce qui
+        // tient dans un en-tête.
+        Err(_) => Turn {
+            status,
+            fields: champs_ordinaires(status, alt_svc, &[(EN_TETE_ALLOW, permises)]),
+            body: &[],
+            next: Next::Respond,
+        },
+    }
+}
+
+/// Ce que cette ressource sert, pour qui le demande par `OPTIONS`.
+///
+/// # ELLE NE DESCEND PAS DANS L'APPLICATION, ET C'EST TOUT L'OBJET
+///
+/// `Resource::serves` laissait passer `OPTIONS` — §9.3.7 la veut sur toute
+/// ressource qui existe —, puis aucun bras du dispatch d'`ams-server::api` ne la
+/// reconnaissait : la requête tombait sur son `_ => pas_encore` et rendait
+/// **501**. Le routeur disait oui, l'application disait « pas encore ».
+///
+/// Elle se répond donc ici, où la table de routage est encore sous la main et
+/// où il n'y a rien à consulter : la réponse ne dépend que du type.
+///
+/// # `204`, ET NON `200`
+///
+/// §9.3.7 permet les deux, et un corps n'apporterait rien que l'en-tête ne dise
+/// déjà. §15.3.5 interdit alors tout contenu, ce que `body: &[]` respecte.
+///
+/// # ELLE EXIGE UN JETON, COMME LE RESTE
+///
+/// `Resource::scope` demande la lecture pour `OPTIONS`, et l'autorisation passe
+/// avant. Ce n'est pas un oubli : `Allow` dit quelles méthodes existent sur un
+/// chemin, et le rendre à un inconnu ferait de ce routeur un annuaire public —
+/// très exactement ce que le point 5 de `decider` refuse. **UN SONDAGE CORS,
+/// LUI, EST SANS IDENTIFIANT** : il recevra donc 401, et c'est une décision à
+/// prendre le jour où CORS s'ouvrira, pas un effet de bord à subir ici.
+fn methodes_servies<'o>(
+    alt_svc: &'o [u8],
+    resource: Resource<'_>,
+    sortie: &'o mut [u8],
+) -> Turn<'o> {
+    let (place_de_l_allow, _) = couper(sortie, ams_api::ALLOW_OCTETS_MAX);
+    let permises = resource.allow(place_de_l_allow);
+    Turn {
+        status: StatusCode::NO_CONTENT,
+        fields: champs_ordinaires(
+            StatusCode::NO_CONTENT,
+            alt_svc,
+            &[(EN_TETE_ALLOW, permises)],
+        ),
+        body: &[],
+        next: Next::Respond,
+    }
 }
 
 /// La réponse qui va avec une faute.
