@@ -2333,3 +2333,105 @@ fn un_allow_sans_place_ne_coupe_pas_un_nom() {
     let tour = super::methode_refusee(b"", resource, &mut place);
     assert_eq!(tour.allow(), b"GET", "seule la première méthode tient");
 }
+
+/// **CE QU'UN INCONNU APPREND DÉJÀ, SANS AUCUN JETON** — et ce qu'il n'apprend
+/// pas.
+///
+/// # CET ESSAI FIXE DEUX PROPRIÉTÉS DE SÉCURITÉ, ET IL A CORRIGÉ UNE ERREUR
+///
+/// Il a été écrit le 2026-10-09 pour répondre à une question : exiger un jeton
+/// pour `OPTIONS` protège-t-il quelque chose ? La mesure dit non, et dit pourquoi.
+///
+/// **CE QUI EST DÉJÀ PUBLIC : LA LISTE DES GABARITS.** Un chemin qui existe rend
+/// `401`, un chemin inventé rend `404` — sans jeton, pour tout verbe. La surface
+/// des routes est donc énumérable par n'importe qui, aujourd'hui, et le document
+/// OpenAPI ne révélera rien de plus.
+///
+/// **CE QUI RESTE CACHÉ : L'EXISTENCE D'UN OBJET.** `/v1/accounts/<n'importe
+/// quoi>` rend `401` que le compte existe ou non. C'est le secret que la tranche
+/// du `405` protège, et c'est celui-là qu'il ne faut jamais perdre.
+#[test]
+fn ce_qu_un_inconnu_apprend_et_ce_qu_il_n_apprend_pas() {
+    // Un gabarit qui existe : `401`, et non `404`. Le verbe n'y change rien.
+    for chemin in [
+        &b"/v1/health"[..],
+        b"/v1/mailboxes",
+        b"/v1/accounts/ada",
+        b"/v1/me/audit",
+    ] {
+        for methode in [&b"GET"[..], b"OPTIONS", b"PATCH", b"DELETE"] {
+            let mut place = [0_u8; PLACE];
+            let session = une_session();
+            let tour = tour_de(methode, chemin, b"", &mut place, &session);
+            assert_eq!(
+                tour.status(),
+                StatusCode::UNAUTHORIZED,
+                "{} {} : un gabarit connu rend 401",
+                texte(methode),
+                texte(chemin)
+            );
+        }
+    }
+
+    // Un gabarit inventé : `404`, sans jeton, pour tout verbe.
+    for chemin in [
+        &b"/v1/inconnu"[..],
+        b"/v1/mailboxes/INBOX/zzz",
+        b"/v1/accounts/ada/zzz",
+        b"/v2/health",
+    ] {
+        for methode in [&b"GET"[..], b"OPTIONS", b"PATCH"] {
+            let mut place = [0_u8; PLACE];
+            let session = une_session();
+            let tour = tour_de(methode, chemin, b"", &mut place, &session);
+            assert_eq!(
+                tour.status(),
+                StatusCode::NOT_FOUND,
+                "{} {} : un gabarit inventé rend 404",
+                texte(methode),
+                texte(chemin)
+            );
+        }
+    }
+}
+
+/// **L'`Allow` NE DÉPEND QUE DU GABARIT, JAMAIS DE L'OBJET.**
+///
+/// # C'EST CETTE PROPRIÉTÉ QUI REND `OPTIONS` ANODINE
+///
+/// `Resource::allowed` est un `match` sur la VARIANTE, et rien d'autre : il ne
+/// consulte aucun magasin. Deux boîtes, l'une plausible et l'autre absurde,
+/// obtiennent donc le même `Allow`.
+///
+/// **LE JOUR OÙ CELA CESSERAIT D'ÊTRE VRAI**, `OPTIONS` deviendrait un oracle
+/// d'existence : une boîte en lecture seule qui n'annoncerait pas `PUT` dirait,
+/// à qui sait lire, qu'elle existe et comment. Cet essai est ce qui l'empêche.
+#[test]
+fn l_allow_ne_depend_jamais_de_l_objet() {
+    for (plausible, absurde) in [
+        (
+            ams_api::Resource::Mailbox { boite: "INBOX" },
+            ams_api::Resource::Mailbox {
+                boite: "n-existe-pas",
+            },
+        ),
+        (
+            ams_api::Resource::Account { compte: "ada" },
+            ams_api::Resource::Account {
+                compte: "fantome-total",
+            },
+        ),
+        (
+            ams_api::Resource::Draft { id: "br" },
+            ams_api::Resource::Draft { id: "zzzz" },
+        ),
+    ] {
+        let mut un = [0_u8; ams_api::ALLOW_OCTETS_MAX];
+        let mut autre = [0_u8; ams_api::ALLOW_OCTETS_MAX];
+        assert_eq!(
+            plausible.allow(&mut un),
+            absurde.allow(&mut autre),
+            "l'`Allow` distingue deux objets : c'est un oracle d'existence"
+        );
+    }
+}

@@ -348,13 +348,42 @@ fuzz_target!(|entree: Entree| {
             assert!(!account.is_empty(), "un enrôlement sans compte");
         }
         Next::Respond => {
-            // Un refus porte un document, et son code n'est jamais un succès
-            // silencieux.
-            assert!(
-                tour.status().class() >= 4,
-                "on répond {} sans rien servir",
-                tour.status().value()
-            );
+            // **DEUX CAS, ET DEUX SEULEMENT.**
+            //
+            // Cette propriété disait « un `Next::Respond` porte toujours un code
+            // de classe 4 ou 5 » — un refus porte un document, et son code n'est
+            // jamais un succès silencieux. Elle était vraie tant que cette voie
+            // ne servait QUE des refus.
+            //
+            // Depuis la 0.2.68, la session répond elle-même à `OPTIONS` par un
+            // `204` sans corps (§9.3.7 de RFC 9110) : elle a la table de routage
+            // sous la main, et l'application rendait `501`. C'est le fuzz qui a
+            // dit que la propriété avait changé — non les essais, qui ne
+            // tiraient pas ce cas.
+            //
+            // Elle est donc resserrée, et non élargie : le seul succès admis sur
+            // cette voie est celui d'`OPTIONS`, sans corps et avec son `Allow`.
+            if tour.status() == StatusCode::NO_CONTENT {
+                assert_eq!(
+                    tete.method(),
+                    Method::Options,
+                    "un 204 est sorti de la session pour un autre verbe qu'`OPTIONS`"
+                );
+                assert!(
+                    tour.body().is_empty(),
+                    "un 204 ne porte JAMAIS de contenu (§15.3.5 de RFC 9110)"
+                );
+                assert!(
+                    !tour.allow().is_empty(),
+                    "la réponse à `OPTIONS` doit dire ce que la ressource sert"
+                );
+            } else {
+                assert!(
+                    tour.status().class() >= 4,
+                    "on répond {} sans rien servir",
+                    tour.status().value()
+                );
+            }
         }
     }
 
