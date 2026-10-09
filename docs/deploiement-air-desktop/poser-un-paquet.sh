@@ -97,7 +97,33 @@ mal=0
 AP_EMPREINTE=$(sha256sum "$CONF" | cut -c1-16)
 [ "$AV_EMPREINTE" = "$AP_EMPREINTE" ] || { echo "  LA CONFIGURATION A CHANGÉ : $AV_EMPREINTE -> $AP_EMPREINTE"; mal=1; }
 sudo -u air-mail air-mail-admin config show "$CONF" > /tmp/conf.apres 2>&1
-diff -q /tmp/conf.avant /tmp/conf.apres >/dev/null || { echo "  \`config show\` a changé :"; diff /tmp/conf.avant /tmp/conf.apres | head -8 | sed 's/^/    /'; mal=1; }
+
+# ── LES DEUX RELECTURES NE SONT PAS FAITES PAR LE MÊME BINAIRE ──────────────
+#
+# `conf.avant` sort de l'ANCIEN `config show`, `conf.apres` du NOUVEAU : c'est
+# tout l'intérêt de la mesure, mais c'est aussi son piège. Une version qui
+# apprend à dire une chose de plus ajoute une ligne, et la comparaison brute
+# criait alors « LA CONFIGURATION A CHANGÉ » alors que le fichier était intact.
+#
+# C'est arrivé le 2026-10-09, sur les deux MX : 0.2.65 ajoute `annonce ASL
+# ÉTEINTE`, et la pose a été déclarée en ÉCHEC deux fois de suite — service
+# actif, zéro redémarrage, IMAPS et SMTPS saluant deux fois, empreinte du
+# fichier inchangée. Un contrôle qui crie au loup sur une pose saine apprend à
+# son lecteur à ne plus le croire, et c'est pire que pas de contrôle.
+#
+# Ce qui juge VRAIMENT que la configuration n'a pas bougé est l'empreinte du
+# fichier, mesurée juste au-dessus. Ce qui reste à cette comparaison-ci est le
+# cas où le nouveau binaire relit mal un champ : une ligne qui DISPARAÎT ou qui
+# CHANGE, et c'est donc sur celles-là seules qu'elle tombe.
+perdues=$(diff /tmp/conf.avant /tmp/conf.apres | grep -c '^<' || true)
+if [ "$perdues" -gt 0 ]; then
+    echo "  LE NOUVEAU BINAIRE NE REND PLUS $perdues ligne(s) que l'ancien rendait :"
+    diff /tmp/conf.avant /tmp/conf.apres | grep '^<' | head -8 | sed 's/^/    /'
+    mal=1
+elif ! diff -q /tmp/conf.avant /tmp/conf.apres >/dev/null; then
+    echo "  (note : la nouvelle version dit $(diff /tmp/conf.avant /tmp/conf.apres | grep -c '^>') ligne(s) de plus)"
+    diff /tmp/conf.avant /tmp/conf.apres | grep '^>' | head -4 | sed 's/^/      /'
+fi
 
 if [ "$mal" -ne 0 ]; then
     echo
