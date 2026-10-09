@@ -93,8 +93,7 @@ fn chaque_methode_servie_y_figure_et_pas_une_de_plus() {
     for entree in CATALOGUE {
         let tranche = bloc(&document, entree.gabarit);
         for method in VERBES {
-            let attendu =
-                entree.exemplaire.allowed().contains(&method) || matches!(method, Method::Options);
+            let attendu = entree.exemplaire.allowed().contains(&method);
             assert_eq!(
                 tranche.contains(&format!("\"{}\": {{", verbe(method))),
                 attendu,
@@ -107,21 +106,38 @@ fn chaque_methode_servie_y_figure_et_pas_une_de_plus() {
     }
 }
 
-/// `OPTIONS` est décrite partout, et elle rend `Allow`.
+/// `OPTIONS` n'est PAS décrite, et l'en-tête `Allow` non plus.
+///
+/// # L'ESSAI QUI DIT CE QUE LE SERVEUR NE FAIT PAS
+///
+/// `Resource::serves` laisse passer `OPTIONS` sur toute ressource qui existe, et
+/// le commentaire de `allowed` annonce « c'est ce qu'on écrit dans `Allow` ».
+/// **Ni l'un ni l'autre n'est honoré** : `champs_ordinaires` n'écrit jamais
+/// `allow`, et une requête `OPTIONS` tombe sur le `_ => pas_encore`
+/// d'`ams-server::api`, qui rend 501.
+///
+/// Le document avait d'abord décrit les deux, sur la foi de ces commentaires.
+/// C'était le mensonge que ce module existe pour éviter, et c'est cet essai qui
+/// le tient fermé : le jour où le serveur les servira, il échouera, et il
+/// faudra le réécrire en même temps que le document.
 #[test]
-fn options_est_servie_partout() {
+fn options_et_allow_ne_sont_pas_decrits() {
     let document = document();
     for entree in CATALOGUE {
         let tranche = bloc(&document, entree.gabarit);
         assert!(
-            tranche.contains("\"options\": {"),
-            "{} : OPTIONS n'est pas décrite",
+            !tranche.contains("\"options\": {"),
+            "{} : OPTIONS est décrite alors que le serveur rend 501",
             entree.gabarit
         );
     }
     assert!(
-        document.contains("\"Allow\": {"),
-        "`Allow` n'est pas décrit"
+        !document.contains("\"Allow\""),
+        "`Allow` est déclaré alors qu'aucune réponse ne le porte"
+    );
+    assert!(
+        document.contains("aucun gestionnaire ne l'honore"),
+        "le document devrait dire pourquoi OPTIONS n'y est pas"
     );
 }
 

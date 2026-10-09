@@ -4,7 +4,7 @@
     "title": "air-mail-server — API REST",
     "version": "0.2.67",
     "summary": "Lire et envoyer du courrier, et administrer ce serveur.",
-    "description": "Ce document est ENGENDRÉ depuis la table de routage du serveur (`ams-api::catalogue`) : les chemins, les méthodes servies et la portée exigée par opération ne peuvent donc pas s'écarter de ce qui est servi, et une barrière de CI le vérifie à chaque changement.\n\nCE QU'IL NE DÉCRIT PAS : les schémas de corps de requête et de réponse, et les codes de succès exacts. Ceux-là vivent dans les gestionnaires et non dans la table ; les déclarer ici sans les y lire serait les inventer. Les succès sont donc donnés par plage (2XX).\n\nLes refus, eux, sont exacts : `application/problem+json` (RFC 9457), et les types énumérés sont ceux de l'énumération `Reason`.\n\nLa version est dans le chemin, et elle est obligatoire : `/v1/…`.",
+    "description": "Ce document est ENGENDRÉ depuis la table de routage du serveur (`ams-api::catalogue`) : les chemins, les méthodes servies et la portée exigée par opération ne peuvent donc pas s'écarter de ce qui est servi, et une barrière de CI le vérifie à chaque changement.\n\nCE QU'IL NE DÉCRIT PAS : les schémas de corps de requête et de réponse, et les codes de succès exacts. Ceux-là vivent dans les gestionnaires et non dans la table ; les déclarer ici sans les y lire serait les inventer. Les succès sont donc donnés par plage (2XX).\n\nLes refus, eux, sont exacts : `application/problem+json` (RFC 9457), et les types énumérés sont ceux de l'énumération `Reason`.\n\nLa version est dans le chemin, et elle est obligatoire : `/v1/…`.\n\n`OPTIONS` N'EST PAS DÉCRITE : le routeur l'accepte sur toute ressource qui existe, mais aucun gestionnaire ne l'honore encore et la réponse est un 501. Pour la même raison, l'en-tête `Allow` n'est pas déclaré : un 405 ne le porte pas aujourd'hui, alors que §15.5.6 de RFC 9110 l'exige. Les deux sont des manques du serveur, et ce document ne les masque pas.",
     "license": {
       "name": "MPL-2.0",
       "identifier": "MPL-2.0"
@@ -70,61 +70,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Échanger des identifiants contre un jeton. N'exige aucune portée : c'est là qu'on en obtient.",
-        "operationId": "options_v1_tokens",
-        "tags": [
-        "portes d'entrée"
-      ],
-        "description": "N'EXIGE AUCUN JETON : c'est une porte d'entrée. Ce qui autorise est dans le corps.",
-        "security": [],
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/tokens/current": {
@@ -139,60 +84,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Révoquer le jeton présenté.",
-        "operationId": "options_v1_tokens_current",
-        "tags": [
-        "soi-même"
-      ],
-        "description": "Exige un jeton valide, sans portée particulière.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -278,61 +169,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Obtenir un défi à signer. Émis pour n'importe quel couple compte-appareil, connu ou non, pour ne pas être un oracle d'énumération.",
-        "operationId": "options_v1_sessions_challenge",
-        "tags": [
-        "portes d'entrée"
-      ],
-        "description": "N'EXIGE AUCUN JETON : c'est une porte d'entrée. Ce qui autorise est dans le corps.",
-        "security": [],
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/sessions": {
@@ -348,61 +184,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Ouvrir une session avec la clef d'un appareil : un défi signé au lieu d'un mot de passe, et le même jeton en retour.",
-        "operationId": "options_v1_sessions",
-        "tags": [
-        "portes d'entrée"
-      ],
-        "description": "N'EXIGE AUCUN JETON : c'est une porte d'entrée. Ce qui autorise est dans le corps.",
-        "security": [],
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -488,61 +269,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Enrôler un appareil. C'est l'invitation scellée, dans le corps, qui autorise — pas un jeton.",
-        "operationId": "options_v1_devices",
-        "tags": [
-        "portes d'entrée"
-      ],
-        "description": "N'EXIGE AUCUN JETON : c'est une porte d'entrée. Ce qui autorise est dans le corps.",
-        "security": [],
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/invitations": {
@@ -592,60 +318,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Frapper une invitation d'enrôlement. Geste d'exploitant.",
-        "operationId": "options_v1_invitations",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/me/password": {
@@ -660,60 +332,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Changer son propre mot de passe. L'actuel est exigé dans le corps : sans cela, un jeton volé deviendrait un vol de compte.",
-        "operationId": "options_v1_me_password",
-        "tags": [
-        "soi-même"
-      ],
-        "description": "Exige un jeton valide, sans portée particulière.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -890,60 +508,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Ses appareils. Le POST est l'appairage croisé, et exige un défi signé par un appareil déjà enrôlé.",
-        "operationId": "options_v1_me_devices",
-        "tags": [
-        "soi-même"
-      ],
-        "description": "Exige un jeton valide, sans portée particulière.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/me/devices/{id}": {
@@ -971,60 +535,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Révoquer un de ses appareils. Le compte de qui appelle entre dans la recherche.",
-        "operationId": "options_v1_me_devices_id",
-        "tags": [
-        "soi-même"
-      ],
-        "description": "Exige un jeton valide, sans portée particulière.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -1247,60 +757,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Son abonnement aux notifications poussées.",
-        "operationId": "options_v1_me_push",
-        "tags": [
-        "soi-même"
-      ],
-        "description": "Exige un jeton valide, sans portée particulière.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/me/app-passwords": {
@@ -1442,60 +898,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Ses mots de passe applicatifs. Le secret n'est rendu qu'à la création.",
-        "operationId": "options_v1_me_app_passwords",
-        "tags": [
-        "soi-même"
-      ],
-        "description": "Exige un jeton valide, sans portée particulière.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/me/app-passwords/{id}": {
@@ -1523,60 +925,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Révoquer un mot de passe applicatif.",
-        "operationId": "options_v1_me_app_passwords_id",
-        "tags": [
-        "soi-même"
-      ],
-        "description": "Exige un jeton valide, sans portée particulière.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -1672,60 +1020,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Les boîtes d'autrui auxquelles on a accès.",
-        "operationId": "options_v1_me_delegations",
-        "tags": [
-        "soi-même"
-      ],
-        "description": "Exige un jeton valide, sans portée particulière.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -1866,60 +1160,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Son journal d'audit. Il se lit, et c'est tout.",
-        "operationId": "options_v1_me_audit",
-        "tags": [
-        "soi-même"
-      ],
-        "description": "Exige un jeton valide, sans portée particulière.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/mailboxes": {
@@ -1980,60 +1220,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Les boîtes du compte.",
-        "operationId": "options_v1_mailboxes",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -2269,60 +1455,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Une boîte et son état. PUT la crée, DELETE la supprime.",
-        "operationId": "options_v1_mailboxes_boite",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/mailboxes/{boite}/messages": {
@@ -2458,60 +1590,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Les messages qu'elle porte. Le POST y dépose un message.",
-        "operationId": "options_v1_mailboxes_boite_messages",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -2757,60 +1835,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Un message : enveloppe et structure. PATCH en json-patch+json pour ses drapeaux.",
-        "operationId": "options_v1_mailboxes_boite_messages_uid",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/mailboxes/{boite}/messages/{uid}/raw": {
@@ -2894,60 +1918,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Le message tel qu'il est arrivé. Une ressource à part, et non une négociation de contenu.",
-        "operationId": "options_v1_mailboxes_boite_messages_uid_raw",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -3077,60 +2047,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Une partie MIME, numérotée comme §6.4.5 de RFC 9051.",
-        "operationId": "options_v1_mailboxes_boite_messages_uid_parts_partie",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -3304,60 +2220,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Ce qui a changé depuis un point. `?since=<modseq>` est exigé ; un curseur trop vieux rend 410.",
-        "operationId": "options_v1_mailboxes_boite_changes",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/mailboxes/{boite}/search": {
@@ -3385,60 +2247,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Une recherche. Un POST, pour que les critères ne soient pas journalisés par les intermédiaires.",
-        "operationId": "options_v1_mailboxes_boite_search",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -3536,60 +2344,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Copier des messages vers une autre boîte. Un geste, pas un état.",
-        "operationId": "options_v1_mailboxes_boite_copy",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/mailboxes/{boite}/move": {
@@ -3652,60 +2406,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Déplacer des messages vers une autre boîte.",
-        "operationId": "options_v1_mailboxes_boite_move",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/drafts": {
@@ -3720,60 +2420,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Créer un brouillon à partir du corps seul : un message se soumet corps d'abord.",
-        "operationId": "options_v1_drafts",
-        "tags": [
-        "submit"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `submit:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -3963,60 +2609,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Un brouillon : son état, ou son abandon.",
-        "operationId": "options_v1_drafts_id",
-        "tags": [
-        "submit"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `submit:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/drafts/{id}/attachments": {
@@ -4044,60 +2636,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Déclarer une pièce jointe à ce brouillon.",
-        "operationId": "options_v1_drafts_id_attachments",
-        "tags": [
-        "submit"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `submit:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -4251,60 +2789,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Poser le contenu d'une pièce jointe. Un morceau se pose, il ne se lit pas.",
-        "operationId": "options_v1_drafts_id_attachments_n",
-        "tags": [
-        "submit"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `submit:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/drafts/{id}/send": {
@@ -4332,60 +2816,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Composer le message entier et l'envoyer.",
-        "operationId": "options_v1_drafts_id_send",
-        "tags": [
-        "submit"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `submit:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -4483,60 +2913,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Ranger le brouillon composé dans une boîte. Seule route du groupe en portée `mail`.",
-        "operationId": "options_v1_drafts_id_store",
-        "tags": [
-        "mail"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `mail:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/submissions": {
@@ -4551,60 +2927,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Soumettre un message complet, d'un seul coup.",
-        "operationId": "options_v1_submissions",
-        "tags": [
-        "submit"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `submit:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -4746,60 +3068,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Les comptes. Le POST en crée un.",
-        "operationId": "options_v1_accounts",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -5035,60 +3303,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Un compte : son état, sa création par PUT, sa suppression.",
-        "operationId": "options_v1_accounts_compte",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/accounts/{compte}/password": {
@@ -5116,60 +3330,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Imposer un mot de passe. Ne se lit pas : aucune méthode ne rend d'empreinte.",
-        "operationId": "options_v1_accounts_compte_password",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -5359,60 +3519,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Les adresses de ce compte.",
-        "operationId": "options_v1_accounts_compte_addresses",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/accounts/{compte}/delegates": {
@@ -5486,60 +3592,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Qui a accès à la boîte de ce compte.",
-        "operationId": "options_v1_accounts_compte_delegates",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -5659,60 +3711,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Accorder ou retirer une délégation.",
-        "operationId": "options_v1_accounts_compte_delegates_delegue",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -5902,60 +3900,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Les appareils de ce compte.",
-        "operationId": "options_v1_accounts_compte_devices",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/accounts/{compte}/devices/{id}": {
@@ -5994,60 +3938,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Révoquer l'appareil d'un compte.",
-        "operationId": "options_v1_accounts_compte_devices_id",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -6201,60 +4091,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Le journal d'audit de ce compte.",
-        "operationId": "options_v1_accounts_compte_audit",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/domains": {
@@ -6315,60 +4151,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Les domaines que ce serveur héberge.",
-        "operationId": "options_v1_domains",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -6499,60 +4281,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "Les bannissements en cours.",
-        "operationId": "options_v1_bans",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/bans/{source}": {
@@ -6580,60 +4308,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Lever un bannissement.",
-        "operationId": "options_v1_bans_source",
-        "tags": [
-        "admin"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `admin:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -6764,60 +4438,6 @@
           "$ref": "#/components/responses/Probleme"
         }
         }
-      },
-      "options": {
-        "summary": "L'état de ce serveur.",
-        "operationId": "options_v1_health",
-        "tags": [
-        "observe"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `observe:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
       }
     },
     "/v1/metrics": {
@@ -6878,60 +4498,6 @@
         "responses": {
           "2XX": {
             "description": "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document."
-          },
-          "400": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "401": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "403": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "404": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "405": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "409": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "410": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "413": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "429": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "500": {
-          "$ref": "#/components/responses/Probleme"
-        },
-          "default": {
-          "$ref": "#/components/responses/Probleme"
-        }
-        }
-      },
-      "options": {
-        "summary": "Ses compteurs.",
-        "operationId": "options_v1_metrics",
-        "tags": [
-        "observe"
-      ],
-        "description": "Exige un jeton dont la portée ouvre `observe:read`.",
-        "responses": {
-          "204": {
-            "description": "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            "headers": {
-              "Allow": {
-                "description": "Les méthodes que cette ressource sert.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "400": {
           "$ref": "#/components/responses/Probleme"
@@ -7071,14 +4637,6 @@
               "schema": {
               "$ref": "#/components/schemas/Probleme"
             }
-            }
-          },
-          "headers": {
-            "Allow": {
-              "description": "Les méthodes que cette ressource sert.",
-              "schema": {
-                "type": "string"
-              }
             }
           }
         }

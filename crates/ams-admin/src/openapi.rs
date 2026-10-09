@@ -114,7 +114,12 @@ const DESCRIPTION: &str = concat!(
     "donc donnés par plage (2XX).\n\n",
     "Les refus, eux, sont exacts : `application/problem+json` (RFC 9457), et les types ",
     "énumérés sont ceux de l'énumération `Reason`.\n\n",
-    "La version est dans le chemin, et elle est obligatoire : `/v1/…`."
+    "La version est dans le chemin, et elle est obligatoire : `/v1/…`.\n\n",
+    "`OPTIONS` N'EST PAS DÉCRITE : le routeur l'accepte sur toute ressource qui ",
+    "existe, mais aucun gestionnaire ne l'honore encore et la réponse est un 501. ",
+    "Pour la même raison, l'en-tête `Allow` n'est pas déclaré : un 405 ne le porte ",
+    "pas aujourd'hui, alors que §15.5.6 de RFC 9110 l'exige. Les deux sont des ",
+    "manques du serveur, et ce document ne les masque pas."
 );
 
 /// Le bloc `servers`.
@@ -149,10 +154,12 @@ fn chemin(entree: &Entree) -> String {
         out.brut("parameters", &parametres);
     }
     for method in VERBES {
-        // `OPTIONS` s'applique à toute ressource qui existe (§9.3.7), et
-        // `allowed` ne la liste jamais : ce n'est pas un droit sur la ressource,
-        // c'est le moyen de demander lesquels le sont.
-        if entree.exemplaire.allowed().contains(&method) || matches!(method, Method::Options) {
+        // **`OPTIONS` N'EST PAS DÉCRITE, ET C'EST MESURÉ.** `Resource::serves`
+        // la laisse passer — §9.3.7 la veut sur toute ressource qui existe —
+        // mais AUCUN gestionnaire ne l'honore : la requête tombe sur le
+        // `_ => pas_encore` d'`ams-server::api` et rend **501**. La décrire
+        // comme servie aurait été le premier mensonge de ce document.
+        if entree.exemplaire.allowed().contains(&method) {
             out.brut(verbe(method), &operation(entree, method));
         }
     }
@@ -422,25 +429,13 @@ fn exigence(entree: &Entree, method: Method) -> String {
 /// Les réponses : le succès par plage, les refus par référence.
 fn reponses(method: Method) -> String {
     let mut out = Objet::new(5);
-    match method {
-        Method::Options => {
-            let mut succes = Objet::new(6);
-            succes.texte(
-                "description",
-                "Les méthodes servies, dans l'en-tête `Allow` (§9.3.7 de RFC 9110).",
-            );
-            succes.brut("headers", &entetes_allow(7));
-            out.brut("204", &succes.fermer());
-        }
-        _ => {
-            let mut succes = Objet::new(6);
-            succes.texte(
-                "description",
-                "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document.",
-            );
-            out.brut("2XX", &succes.fermer());
-        }
-    }
+    let _ = method;
+    let mut succes = Objet::new(6);
+    succes.texte(
+        "description",
+        "Succès. Le code exact et le schéma du corps ne sont pas encore décrits — voir la description du document.",
+    );
+    out.brut("2XX", &succes.fermer());
     for code in REFUS {
         out.brut(
             code,
@@ -451,18 +446,6 @@ fn reponses(method: Method) -> String {
         "default",
         "{\n          \"$ref\": \"#/components/responses/Probleme\"\n        }",
     );
-    out.fermer()
-}
-
-/// L'en-tête `Allow`, que `OPTIONS` et `405` portent tous deux.
-fn entetes_allow(niveau: usize) -> String {
-    let mut schema = Objet::new(niveau.saturating_add(2));
-    schema.texte("type", "string");
-    let mut allow = Objet::new(niveau.saturating_add(1));
-    allow.texte("description", "Les méthodes que cette ressource sert.");
-    allow.brut("schema", &schema.fermer());
-    let mut out = Objet::new(niveau);
-    out.brut("Allow", &allow.fermer());
     out.fermer()
 }
 
@@ -618,7 +601,6 @@ fn reponses_communes() -> String {
         "Un refus, décrit comme RFC 9457 le demande. Le code exact dépend du motif.",
     );
     probleme.brut("content", &contenu.fermer());
-    probleme.brut("headers", &entetes_allow(6));
     let mut out = Objet::new(3);
     out.brut("Probleme", &probleme.fermer());
     out.fermer()

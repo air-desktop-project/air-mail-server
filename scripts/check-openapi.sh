@@ -28,6 +28,13 @@
 #      servie, des `operationId` distincts, et toutes les références internes
 #      qui aboutissent.
 #
+# **ELLE EXIGE AUSSI QUE `OPTIONS` N'Y SOIT PAS.** `Resource::serves` la laisse
+# passer, et le commentaire d'`allowed` annonce un en-tête `Allow` — mais aucun
+# gestionnaire ne l'honore et `champs_ordinaires` ne l'écrit jamais : une requête
+# `OPTIONS` rend 501. Le document avait d'abord décrit les deux, sur la foi de ces
+# commentaires ; c'était le mensonge que tout ceci existe pour éviter. Le jour où
+# le serveur les servira, cette barrière échouera, et ce sera le bon moment.
+#
 # **ELLE N'APPELLE AUCUN VALIDEUR EXTERNE.** `npx @redocly/cli lint` dit « valid »
 # sur ce document, et c'est ainsi qu'il a été éprouvé — mais une barrière qui
 # tire un paquet du réseau à chaque exécution échoue le jour où le réseau est
@@ -129,7 +136,15 @@ for chemin_api, bloc in document["paths"].items():
     )
     verbes = {cle for cle in bloc if cle in VERBES}
     exiger(bool(verbes), f"{chemin_api} ne sert aucune méthode")
-    exiger("options" in verbes, f"{chemin_api} ne décrit pas OPTIONS")
+    # **OPTIONS NE DOIT PAS Y ÊTRE, ET C'EST MESURÉ.** `Resource::serves` la
+    # laisse passer (§9.3.7 la veut sur toute ressource qui existe), mais aucun
+    # gestionnaire ne l'honore : la requête tombe sur le `_ => pas_encore`
+    # d'`ams-server::api` et rend 501. Le jour où le serveur la servira, c'est
+    # cette ligne qu'il faudra retourner — en même temps que le document.
+    exiger(
+        "options" not in verbes,
+        f"{chemin_api} décrit OPTIONS, que le serveur ne sert pas (501)",
+    )
     for verbe in verbes:
         operations += 1
         operation = bloc[verbe]
