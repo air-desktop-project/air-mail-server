@@ -56,7 +56,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use ams_api::{Key, Scope, Token, issue, resolve, split_query};
+use ams_api::{JSON_MEDIA_TYPE, Key, Scope, Token, issue, resolve, split_query};
 use ams_proto_http::{HeadBuilder, Limits, Method, StatusCode};
 use ams_session::http::{Http, Next};
 
@@ -377,6 +377,63 @@ fuzz_target!(|entree: Entree| {
                     !tour.allow().is_empty(),
                     "la réponse à `OPTIONS` doit dire ce que la ressource sert"
                 );
+            } else if tour.status() == StatusCode::OK || tour.status() == StatusCode::NOT_MODIFIED {
+                // **LE TROISIÈME CAS, RESSERRÉ COMME LES DEUX AUTRES.**
+                //
+                // Depuis le 2026-10-10, la session rend elle-même le contrat de
+                // l'API : `/v1/openapi.json` est servi SANS JETON — décision du
+                // BDFL, prise en connaissance de l'échange — et il sort par cette
+                // voie puisque l'application n'a rien à en dire. C'est encore le
+                // fuzz qui a dit que la propriété avait changé : cet oracle a
+                // refusé « on répond 200 sans rien servir », et les essais, eux,
+                // ne tiraient pas ce cas. Comme pour `OPTIONS` en 0.2.68.
+                //
+                // **ON N'ÉLARGIT PAS À « UN SUCCÈS PEUT SORTIR D'ICI »** : ce
+                // serait rendre muette la propriété que ce bras défend, et
+                // laisser la prochaine ressource servie sans jeton passer sans
+                // un mot. On nomme donc la seule ressource qui en ait le droit,
+                // les seuls verbes qu'elle serve, et ce que chaque code porte.
+                let mut place_du_chemin = [0_u8; 2 * 1024];
+                let (chemin, _requete) = split_query(tete.path());
+                let resolu = resolve(tete.method(), chemin, &mut place_du_chemin)
+                    .expect("la session a servi un succès : cette route se résout");
+                assert!(
+                    matches!(resolu.resource, ams_api::Resource::OpenApi),
+                    "{:?} a servi un succès par la voie des réponses de session",
+                    resolu.resource
+                );
+                assert!(
+                    tete.method() == Method::Get || tete.method() == Method::Head,
+                    "le document est sorti d'un autre verbe que `GET` ou `HEAD`"
+                );
+                // **L'ÉTIQUETTE EST CE QUI REND LE `304` ATTEIGNABLE.** Sans
+                // elle, aucun client ne peut poser la question conditionnelle, et
+                // la branche d'économie meurt sans bruit — un document inchangé
+                // retraverserait le réseau à chaque démarrage de client.
+                assert!(
+                    champs_rendus
+                        .iter()
+                        .any(|(nom, valeur)| *nom == b"etag" && !valeur.is_empty()),
+                    "le document est servi sans `ETag`"
+                );
+                if tour.status() == StatusCode::OK {
+                    assert!(
+                        !tour.body().is_empty(),
+                        "un `200` sur le document ne porte aucun document"
+                    );
+                    assert!(
+                        champs_rendus
+                            .iter()
+                            .any(|(nom, valeur)| *nom == b"content-type"
+                                && *valeur == JSON_MEDIA_TYPE.as_bytes()),
+                        "le document est servi sans se dire du JSON"
+                    );
+                } else {
+                    assert!(
+                        tour.body().is_empty(),
+                        "un `304` porte du contenu (§15.4.5 de RFC 9110)"
+                    );
+                }
             } else {
                 assert!(
                     tour.status().class() >= 4,
