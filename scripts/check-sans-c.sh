@@ -119,5 +119,5 @@ fi
 
 echo "graphe    : $combien crates hors dépendances d'essai"
 echo
-echo "OK : ni \`ring\`, ni \`cc\`, ni crate \`*-sys\` — et aucun objet qu'un"
-echo "     compilateur C aurait produit (provenance MESURÉE, cf. critère 3)."
+echo "OK : ni \`ring\`, ni \`cc\`, ni crate \`*-sys\` — et aucun objet refusé"
+echo "     par le critère 3, dont la ligne ci-dessus dit CE QU'IL A EXAMINÉ."

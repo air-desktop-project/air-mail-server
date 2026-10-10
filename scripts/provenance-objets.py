@@ -53,6 +53,7 @@ précisément ce qu'elle existe pour arrêter.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import pathlib
@@ -66,6 +67,35 @@ import tempfile
 MARQUE_RUSTC = re.compile(r"rustc version")
 # Les producteurs que l'on sait nommer dans un message d'échec.
 MARQUE_C = re.compile(r"GCC:|clang version")
+
+# Les trois issues possibles pour un objet. Nommées, parce que le compte final les
+# distingue et qu'un booléen ne saurait pas dire « accepté par exemption ».
+ORIGINE_RUSTC = "rustc"
+ORIGINE_EXEMPTE = "exemption"
+ORIGINE_REFUS = "refus"
+
+
+@dataclasses.dataclass
+class Compte:
+    """Ce qui a été réellement examiné, pour qu'un vert dise SUR QUOI il porte.
+
+    Sans ces compteurs, la sortie était la même que le critère ait lu la provenance de
+    887 objets ou d'aucun — et c'est exactement la différence entre une garantie et un
+    silence. Constaté le 2026-10-10 dans ``air-mail-server``, où la barrière rendait
+    « provenance MESURÉE » sur **zéro** objet : l'arbre est purement Rust, il n'y avait
+    rien à mesurer, et c'était la vérité du dépôt — mais le message en faisait une
+    garantie. Le cas « rien à mesurer » est légitime ; il ne doit pas se déguiser.
+    """
+
+    archives: int = 0
+    membres: int = 0
+    objets: int = 0
+    rustc: int = 0
+    exemptes: int = 0
+
+    def examines(self) -> int:
+        """Les objets dont la provenance a été LUE : membres d'archive et objets isolés."""
+        return self.membres + self.objets
 
 
 def sortie(commande: list[str]) -> str | None:
@@ -130,22 +160,37 @@ def producteur(chemin: pathlib.Path) -> str | None:
     return None
 
 
-def juger(nom: str, chemin: pathlib.Path, exemptes: set[str]) -> str | None:
-    """Rend `None` si l'objet est acceptable, sinon la raison du refus."""
+def juger(nom: str, chemin: pathlib.Path, exemptes: set[str]) -> tuple[str, str | None]:
+    """Rend l'origine établie et, quand elle est refusée, la raison du refus.
+
+    L'origine est rendue même en cas d'acceptation : c'est ce qui permet au compte final
+    de distinguer « produit par rustc » d'« accepté par exemption », deux acceptations
+    qui n'ont pas la même portée.
+    """
     marque = producteur(chemin)
     if marque is not None and MARQUE_RUSTC.search(marque):
-        return None
+        return ORIGINE_RUSTC, None
     if empreinte(chemin) in exemptes:
         # Octet pour octet un objet `compiler-rt` livré par la toolchain : hors de portée
         # de C4, qui vise les crates TIERCES. Le nom ne joue aucun rôle.
-        return None
+        return ORIGINE_EXEMPTE, None
     if marque is None:
-        return f"{nom} — provenance indéterminable (aucune section `.comment` lisible)"
-    return f"{nom} — compilé par {marque}"
+        return (
+            ORIGINE_REFUS,
+            f"{nom} — provenance indéterminable (aucune section `.comment` lisible)",
+        )
+    return ORIGINE_REFUS, f"{nom} — compilé par {marque}"
 
 
-def membres_archive(archive: pathlib.Path, exemptes: set[str]) -> list[str]:
-    """Juge chaque membre d'une archive, dans un répertoire temporaire."""
+def membres_archive(
+    archive: pathlib.Path, exemptes: set[str], compte: Compte
+) -> list[str]:
+    """Juge chaque membre d'une archive, dans un répertoire temporaire, et le compte.
+
+    Une archive compte pour UN candidat sur le disque mais pour autant d'objets qu'elle
+    porte de membres — 887 dans la `staticlib` du client. Ne compter que les archives
+    masquerait l'essentiel du travail fait, et les 35 exemptions avec lui.
+    """
     liste = sortie(["ar", "t", str(archive)])
     if liste is None:
         return [f"{archive} — archive illisible par `ar`"]
@@ -164,10 +209,15 @@ def membres_archive(archive: pathlib.Path, exemptes: set[str]) -> list[str]:
             return [f"{archive} — extraction impossible : {extrait.stderr.strip()}"]
         for nom in noms:
             sous = pathlib.Path(temporaire) / nom
+            compte.membres += 1
             if not sous.is_file():
                 refus.append(f"{archive}({nom}) — membre absent après extraction")
                 continue
-            raison = juger(nom, sous, exemptes)
+            origine, raison = juger(nom, sous, exemptes)
+            if origine == ORIGINE_RUSTC:
+                compte.rustc += 1
+            elif origine == ORIGINE_EXEMPTE:
+                compte.exemptes += 1
             if raison is not None:
                 refus.append(f"{archive}({raison})")
     return refus
@@ -211,14 +261,18 @@ def main() -> int:
     candidats = sorted(candidats_sous_out())
 
     refus: list[str] = []
-    archives = objets = 0
+    compte = Compte()
     for candidat in candidats:
         if candidat.suffix == ".a":
-            archives += 1
-            refus.extend(membres_archive(candidat, exemptes))
+            compte.archives += 1
+            refus.extend(membres_archive(candidat, exemptes, compte))
         else:
-            objets += 1
-            raison = juger(candidat.name, candidat, exemptes)
+            compte.objets += 1
+            origine, raison = juger(candidat.name, candidat, exemptes)
+            if origine == ORIGINE_RUSTC:
+                compte.rustc += 1
+            elif origine == ORIGINE_EXEMPTE:
+                compte.exemptes += 1
             if raison is not None:
                 refus.append(f"{candidat.parent}/{raison}")
 
@@ -230,17 +284,26 @@ def main() -> int:
             print(f"           … et {len(refus) - 20} autre(s)")
         return 1
 
-    if archives == 0 and objets == 0:
-        print("aucun objet sous la sortie d'un script de construction")
+    if compte.examines() == 0:
+        # Pas une violation : un arbre purement Rust n'a rien à mettre là. Mais pas une
+        # garantie non plus, et le mot « mesurée » est donc refusé à ce cas.
+        print("RIEN À MESURER  aucun `.o` ni `.a` sous la sortie d'un script de")
+        print("                construction — ce critère n'a donc RIEN examiné ici,")
+        print("                et ne garantit rien de plus que cette absence.")
         return 0
 
     print(
-        f"provenance mesurée : {archives} archive(s) et {objets} objet(s) examinés, "
-        "tous produits par rustc"
+        f"provenance mesurée : {compte.examines()} objet(s) examinés "
+        f"({compte.archives} archive(s) de {compte.membres} membre(s) "
+        f"et {compte.objets} objet(s) isolé(s))"
     )
     print(
-        f"           (exemption par origine : {len(exemptes)} empreintes `compiler-rt` "
-        "livrées par la toolchain)"
+        f"                     {compte.rustc} portent `rustc version`, "
+        f"{compte.exemptes} exempté(s) par empreinte `compiler-rt`"
+    )
+    print(
+        f"                     (exemption adossée à {len(exemptes)} empreintes relevées "
+        "dans le sysroot)"
     )
     return 0
 
