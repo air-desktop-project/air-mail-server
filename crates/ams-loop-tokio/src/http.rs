@@ -41,7 +41,7 @@
 use core::future::Future;
 use std::sync::Arc;
 
-use ams_api::{Area, JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, Resource, Rights, Scope};
+use ams_api::{Area, JSON_MEDIA_TYPE, Resource, Rights, Scope};
 use ams_guard::{Event as GuardEvent, Source, Verdict};
 use ams_proto_h2::{
     Connection, ErrorCode, Event, FRAME_HEADER_OCTETS, FrameReader, Handshake, Need, PREFACE,
@@ -73,7 +73,12 @@ const TRAVAIL_OCTETS: usize = SCRATCH_OCTETS_MIN + 64 * 1024;
 const ENTETES_OCTETS: usize = 16 * 1024;
 
 /// Ce qu'une réponse servie peut porter.
-const RENDU_OCTETS: usize = 256 * 1024;
+///
+/// **LES DEUX TRANSPORTS PARTAGENT CETTE BORNE**, et une assertion de
+/// compilation l'exige dans `h3.rs` : celui d'HTTP/3 valait 64 Kio, soit quatre
+/// fois moins. Une réponse qui tenait sur un transport était donc refusée sur
+/// l'autre, et le client ne savait pas auquel des deux il parlait.
+pub(crate) const RENDU_OCTETS: usize = 256 * 1024;
 
 /// Combien de champs une réponse porte au plus, `content-type` compris.
 const CHAMPS_MAX: usize = ams_session::http::FIELDS_MAX + 1 + ams_session::http::PIECE_MAX;
@@ -669,8 +674,16 @@ where
         // **UNE SEULE ADMISSION PAR REQUÊTE** : elle prend un jeton au seau de
         // l'appareil.
         let admission = admettre(api, tour.next(), maintenant);
+        // **CE QUE LA SESSION A DÉJÀ DÉCIDÉ NE SE DEVINE PAS ICI.** `Allow` est
+        // vide partout sauf sur un `405` et sur la réponse à `OPTIONS` ; le lire
+        // sur le tour évite une seconde table, et une seconde divergence.
+        let permises = tour.allow();
         let (status, media, corps_a_ecrire) = match tour.next() {
-            Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
+            // **LE TYPE VENAIT D'ICI, ET IL ÉTAIT FAUX.** Ce bras écrivait
+            // `PROBLEM_MEDIA_TYPE` pour tout `Next::Respond`, sur la foi que
+            // seule une faute y passe. `OPTIONS` rend un `204` sans corps : il
+            // partait avec `content-type: application/problem+json`.
+            Next::Respond => (tour.status(), tour.media(), tour.body()),
             Next::CheckCredentials { login, password } => {
                 let accorde = api.authenticate(login, password);
                 // **L'IDENTIFIANT SE TIRE UNE FOIS**, et il sert deux fois : à sceller
@@ -889,6 +902,7 @@ where
             demande.stream,
             status,
             (media, piece),
+            permises,
             corps_a_ecrire,
             sans_corps,
             &mut ecriture,
@@ -1098,8 +1112,9 @@ where
 #[expect(
     clippy::too_many_arguments,
     reason = "une réponse HTTP/2 demande le flux, la connexion, le service, la \
-              portée, le flux visé, le code, le type, le corps, et de savoir s'il \
-              faut l'écrire. Les regrouper masquerait ce que chacun décide."
+              portée, le flux visé, le code, le type, l'`Allow`, le corps, et de \
+              savoir s'il faut l'écrire. Les regrouper masquerait ce que chacun \
+              décide."
 )]
 async fn repondre<S>(
     flux: &mut S,
@@ -1109,6 +1124,7 @@ async fn repondre<S>(
     stream: u32,
     status: StatusCode,
     (media, piece): (&str, Option<&str>),
+    permises: &[u8],
     corps: &[u8],
     sans_corps: bool,
     ecriture: &mut [u8],
@@ -1118,7 +1134,16 @@ where
 {
     let vide = corps.is_empty() || sans_corps;
     let mut champs: std::vec::Vec<(&[u8], &[u8])> = std::vec::Vec::with_capacity(CHAMPS_MAX);
-    champs.push((b"content-type", media.as_bytes()));
+    // **UNE RÉPONSE SANS CORPS N'ANNONCE PAS DE TYPE.** Ce champ était poussé
+    // sans condition, et un `204` d'`OPTIONS` partait donc avec un
+    // `content-type` qui ne décrivait rien.
+    if !media.is_empty() {
+        champs.push((b"content-type", media.as_bytes()));
+    }
+    // §15.5.6 de RFC 9110 sur un `405`, §9.3.7 sur la réponse à `OPTIONS`.
+    if !permises.is_empty() {
+        champs.push((b"allow", permises));
+    }
     // **CE QUE TOUTE RÉPONSE PORTE VIENT DE LA SESSION**, et non d'une liste
     // écrite ici. Deux listes pour une même API en ont donné deux le jour où
     // l'une a bougé : celle d'HTTP/3 ne portait ni `no-store` ni `nosniff`.

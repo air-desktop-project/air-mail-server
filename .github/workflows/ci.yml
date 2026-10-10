@@ -219,6 +219,16 @@ jobs:
       - name: check-sans-c
         run: ./scripts/check-sans-c.sh
 
+      # ── LE CONTRAT DE L'API EST-IL TOUJOURS CELUI QU'ON PUBLIE ? ──────────
+      #
+      # `docs/openapi.json` est ENGENDRÉ depuis la table de routage, et commité
+      # pour qu'un `diff` fasse voir qu'une route a changé. Cette barrière le
+      # régénère et exige l'identité : une route ajoutée sans régénérer le
+      # document arrête la poussée, au lieu de laisser un contrat périmé derrière
+      # elle.
+      - name: check-openapi
+        run: ./scripts/check-openapi.sh
+
       - name: cargo test
         run: cargo test --workspace --locked
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# check-tout — les onze barrières, dans l'ordre, sans en oublier une.
+# check-tout — les douze barrières, dans l'ordre, sans en oublier une.
 #
 # # LE DÉFAUT QUE CETTE BARRIÈRE FERME
 #
@@ -75,6 +75,7 @@ ORDRE=(
     check-compile
     check-clippy
     check-sans-c
+    check-openapi
     check-couverture
     check-installation
     check-paquet

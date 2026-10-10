@@ -228,6 +228,89 @@ pub enum Reason {
 }
 
 impl Reason {
+    /// Le type de problème que désigne ce code d'état.
+    ///
+    /// **CE SONT DES RÉFÉRENCES RELATIVES**, et §4.2.1 de RFC 9457 les autorise :
+    /// « If the type URI is a relative reference, it MUST be resolved against the
+    /// document's base URI ». Les écrire absolues obligerait ce serveur à connaître
+    /// le nom sous lequel on l'atteint — qu'un mandataire peut changer sans le lui
+    /// dire.
+    ///
+    /// **DEUX RAISONS PARTAGENT `422`**, et le client doit les distinguer — l'une
+    /// l'envoie vers un brouillon, l'autre lui dit qu'il a réutilisé une clé. Le
+    /// type se choisit donc sur la raison, et se replie sur le code d'état.
+    ///
+    /// **ELLE VIVAIT DANS `problem.rs`**, en fonction libre, et le document
+    /// OpenAPI avait besoin de l'énumérer : deux copies d'une même table de
+    /// types auraient divergé au premier ajout de motif.
+    #[must_use]
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::AttachmentsNeedDraft => return "/problems/attachments-need-draft",
+            Self::IdempotencyKeyReused => return "/problems/idempotency-key-reused",
+            Self::UnknownEncoding => return "/problems/unknown-encoding",
+            Self::AttestationRefused => return "/problems/attestation-refused",
+            _ => {}
+        }
+        match self.status().value() {
+            400 => "/problems/bad-request",
+            401 => "/problems/unauthorized",
+            403 => "/problems/forbidden",
+            404 => "/problems/not-found",
+            405 => "/problems/method-not-allowed",
+            409 => "/problems/conflict",
+            410 => "/problems/gone",
+            413 => "/problems/content-too-large",
+            414 => "/problems/uri-too-long",
+            429 => "/problems/too-many-requests",
+            501 => "/problems/not-implemented",
+            503 => "/problems/service-unavailable",
+            // Tout ce qui est nôtre se dit d'une seule façon : le client n'a rien à
+            // en tirer, et le détailler dirait ce que notre code a fait de travers.
+            _ => "/problems/internal",
+        }
+    }
+
+    /// Les trente-deux motifs, pour les ÉNUMÉRER.
+    ///
+    /// **C'EST UN TABLEAU, ET NON UN `match`** : il faut pouvoir les parcourir —
+    /// le document OpenAPI énumère les types de refus, et un `match` ne se
+    /// parcourt pas. Un essai exige qu'il les porte tous, une fois chacun.
+    pub const TOUS: [Self; 32] = [
+        Self::BadPath,
+        Self::PathTooLong,
+        Self::NoSuchResource,
+        Self::MethodNotAllowed,
+        Self::Forbidden,
+        Self::BadPassword,
+        Self::BadToken,
+        Self::TokenExpired,
+        Self::SessionClosed,
+        Self::BadKey,
+        Self::BadAccount,
+        Self::BadMessage,
+        Self::BadJsonBody,
+        Self::BadJson,
+        Self::JsonTooDeep,
+        Self::BufferTooSmall,
+        Self::NotImplemented,
+        Self::AlreadyEnrolled,
+        Self::LimitReached,
+        Self::BadQuery,
+        Self::SyncExpired,
+        Self::BodyTooLarge,
+        Self::AttachmentsNeedDraft,
+        Self::DraftConflict,
+        Self::BadIdempotencyKey,
+        Self::IdempotencyKeyReused,
+        Self::IdempotencyInFlight,
+        Self::UnknownEncoding,
+        Self::NotADevice,
+        Self::TooManyRequests,
+        Self::AttestationRefused,
+        Self::DeliveryUnavailable,
+    ];
+
     /// Le code d'état qui va avec.
     #[must_use]
     pub const fn status(self) -> StatusCode {

@@ -59,51 +59,13 @@ pub fn problem(reason: Reason, sortie: &mut [u8]) -> Result<&[u8], Error> {
     let status = reason.status();
     let mut json = Json::new(sortie);
     json.begin_object()?;
-    json.field_str("type", type_de(reason))?;
+    json.field_str("type", reason.kind())?;
     // §3.1.2 : « a short, human-readable summary of the problem type ». Le nôtre
     // ne nomme jamais la règle qu'on a touchée — voir [`Reason::message`].
     json.field_str("title", reason.message())?;
     json.field_u64("status", u64::from(status.value()))?;
     json.end_object()?;
     json.finish()
-}
-
-/// Le type de problème que désigne ce code d'état.
-///
-/// **CE SONT DES RÉFÉRENCES RELATIVES**, et §4.2.1 de RFC 9457 les autorise :
-/// « If the type URI is a relative reference, it MUST be resolved against the
-/// document's base URI ». Les écrire absolues obligerait ce serveur à connaître
-/// le nom sous lequel on l'atteint — qu'un mandataire peut changer sans le lui
-/// dire.
-///
-/// **DEUX RAISONS PARTAGENT `422`**, et le client doit les distinguer — l'une
-/// l'envoie vers un brouillon, l'autre lui dit qu'il a réutilisé une clé. Le
-/// type se choisit donc sur la raison, et se replie sur le code d'état.
-fn type_de(reason: Reason) -> &'static str {
-    match reason {
-        Reason::AttachmentsNeedDraft => return "/problems/attachments-need-draft",
-        Reason::IdempotencyKeyReused => return "/problems/idempotency-key-reused",
-        Reason::UnknownEncoding => return "/problems/unknown-encoding",
-        Reason::AttestationRefused => return "/problems/attestation-refused",
-        _ => {}
-    }
-    match reason.status().value() {
-        400 => "/problems/bad-request",
-        401 => "/problems/unauthorized",
-        403 => "/problems/forbidden",
-        404 => "/problems/not-found",
-        405 => "/problems/method-not-allowed",
-        409 => "/problems/conflict",
-        410 => "/problems/gone",
-        413 => "/problems/content-too-large",
-        414 => "/problems/uri-too-long",
-        429 => "/problems/too-many-requests",
-        501 => "/problems/not-implemented",
-        503 => "/problems/service-unavailable",
-        // Tout ce qui est nôtre se dit d'une seule façon : le client n'a rien à
-        // en tirer, et le détailler dirait ce que notre code a fait de travers.
-        _ => "/problems/internal",
-    }
 }
 
 #[cfg(test)]

@@ -52,28 +52,6 @@ use ams_api::{
 };
 use ams_proto_http::{Method, RequestHead, StatusCode};
 
-/// Cette ressource accepte-t-elle ces paramètres, sous ce verbe ?
-///
-/// **TROIS RESSOURCES EN PRENNENT, EN LECTURE SEULEMENT** : la liste des
-/// messages (`before`, `limit`), le journal des changements (`since`,
-/// EXIGÉ, et `limit`) et le journal d'audit (`limit`). Ailleurs, un paramètre est refusé plutôt qu'ignoré : un
-/// client qui croit filtrer ce qui ne l'est pas ne s'en apercevrait jamais.
-fn requete_permise(ressource: Resource<'_>, verbe: Method, requete: &Query) -> bool {
-    let lecture = matches!(verbe, Method::Get | Method::Head);
-    match ressource {
-        Resource::Messages { .. } => requete.is_empty() || (lecture && requete.since.is_none()),
-        // **`since` EST EXIGÉ** : une synchronisation incrémentale part de
-        // quelque part. Sans lui, la réponse serait « tout » — ce que la liste
-        // des messages rend déjà, et mieux.
-        Resource::Changes { .. } => requete.since.is_some() && requete.before.is_none(),
-        // Le journal d'audit ne se lit que par la fin : `limit`, et rien d'autre.
-        Resource::OwnAudit | Resource::AccountAudit { .. } => {
-            requete.before.is_none() && requete.since.is_none()
-        }
-        _ => requete.is_empty(),
-    }
-}
-
 /// Ce qu'un document JSON peut faire de long.
 ///
 /// Soixante-quatre kibioctets. Aucun document de cette API n'a besoin de
@@ -355,6 +333,43 @@ impl<'o> Turn<'o> {
         self.fields.iter().flatten().copied()
     }
 
+    /// La valeur de ce champ, s'il y est.
+    fn field(&self, nom: &[u8]) -> Option<&'o [u8]> {
+        self.fields()
+            .find(|(candidat, _)| *candidat == nom)
+            .map(|(_, valeur)| valeur)
+    }
+
+    /// Le type de contenu que cette réponse annonce, **vide s'il n'y en a pas**.
+    ///
+    /// # LES DEUX CONDUCTEURS LE DEVINAIENT, ET SE TROMPAIENT
+    ///
+    /// Chacun écrivait `PROBLEM_MEDIA_TYPE` pour tout `Next::Respond`, sur la
+    /// foi que seule une faute passe par là. C'était vrai jusqu'au jour où
+    /// `OPTIONS` a rendu un `204` sans corps : il partait avec
+    /// `content-type: application/problem+json` sur une réponse vide.
+    ///
+    /// Le type est dans [`Self::fields`] depuis toujours — `champs_ordinaires`
+    /// l'y met — et personne ne l'y lisait. **UN ACCESSEUR QUE SEULS LES ESSAIS
+    /// CONSOMMENT DONNE UNE FAUSSE ASSURANCE** : ils vérifiaient un jeu de
+    /// champs que le fil ne voyait pas.
+    #[must_use]
+    pub fn media(&self) -> &'o str {
+        self.field(EN_TETE_TYPE)
+            .and_then(|valeur| core::str::from_utf8(valeur).ok())
+            .unwrap_or_default()
+    }
+
+    /// La valeur d'`Allow`, **vide s'il n'y en a pas**.
+    ///
+    /// §15.5.6 de RFC 9110 l'exige sur un `405`, et §9.3.7 sur la réponse à
+    /// `OPTIONS`. Les deux la posent dans [`Self::fields`] ; les conducteurs la
+    /// lisent ici.
+    #[must_use]
+    pub fn allow(&self) -> &'o [u8] {
+        self.field(EN_TETE_ALLOW).unwrap_or_default()
+    }
+
     /// Le corps.
     #[must_use]
     pub const fn body(&self) -> &'o [u8] {
@@ -555,6 +570,38 @@ impl Http {
             Err(faute) => return Err((faute.reason(), place_de_la_reponse)),
         };
 
+        // 4 ter. **`OPTIONS` SE RÉPOND SANS JETON, ET C'EST MESURÉ.**
+        //
+        //    Elle l'exigeait, au motif que son `Allow` dirait à un inconnu
+        //    quelles méthodes existent sur un chemin. Deux mesures ont montré que
+        //    ce refus ne protégeait rien, et les deux sont figées en essais :
+        //
+        //      — `Resource::allowed` est un `match` sur la VARIANTE et ne
+        //        consulte aucun magasin : deux objets, l'un plausible et l'autre
+        //        absurde, obtiennent le même `Allow`. Cette réponse ne dit donc
+        //        rien de l'objet, seulement du GABARIT ;
+        //      — et les gabarits sont DÉJÀ publics : sans jeton, un chemin qui
+        //        existe rend `401` et un chemin inventé rend `404`, pour tout
+        //        verbe. La surface des routes s'énumère en une boucle, et le
+        //        document OpenAPI la publie désormais de toute façon.
+        //
+        //    **DÉCOUVRIR N'EST PAS UTILISER.** `OPTIONS` demande ce que l'API
+        //    fait ; tout le reste lui demande de faire quelque chose. Exiger un
+        //    jeton pour la première interdisait la découverte normalisée et
+        //    cassait le sondage préalable de CORS — en échange d'un secret qui
+        //    n'en était pas un.
+        //
+        //    Ce qui reste caché l'est toujours : l'existence d'un OBJET.
+        //    `/v1/accounts/<n'importe quoi>` rend `401` que le compte existe ou
+        //    non, et cette réponse-ci n'y touche pas.
+        if matches!(resolu.method, Method::Options) {
+            return Ok(methodes_servies(
+                self.alt_svc(),
+                resolu.resource,
+                place_de_la_reponse,
+            ));
+        }
+
         // 5. L'AUTORISATION, ET ELLE PASSE AVANT TOUT CE QUI DÉPEND DE LA
         //    RESSOURCE. Un `405` nomme la ressource et énumère ses méthodes ; un
         //    `400` sur le type d'un corps dit qu'on a reconnu le chemin. Les
@@ -568,7 +615,16 @@ impl Http {
             // en obtient une. Son verbe se juge quand même : sans cela, un
             // `GET /v1/tokens` entrerait dans l'échange de jeton.
             if !resolu.serves {
-                return Err((Reason::MethodNotAllowed, place_de_la_reponse));
+                return Ok(methode_refusee(
+                    self.alt_svc(),
+                    resolu.resource,
+                    place_de_la_reponse,
+                ));
+            }
+            // **LE DOCUMENT SE REND ICI**, avant tout ce qui cherche des
+            // identifiants dans un corps : il n'en a pas, et il n'en veut pas.
+            if matches!(resolu.resource, Resource::OpenApi) {
+                return Ok(le_document(self.alt_svc(), tete, place_de_la_reponse));
             }
             // **LE TYPE DU CORPS SE VÉRIFIE ICI AUSSI**, et il n'y a rien à
             // cacher en le faisant : cette ressource-ci est la porte publique,
@@ -617,7 +673,11 @@ impl Http {
 
         // 6. Le verbe, maintenant qu'on a le droit d'apprendre qu'il ne va pas.
         if !resolu.serves {
-            return Err((Reason::MethodNotAllowed, place_de_la_reponse));
+            return Ok(methode_refusee(
+                self.alt_svc(),
+                resolu.resource,
+                place_de_la_reponse,
+            ));
         }
 
         // 7. Le type du corps, maintenant qu'on sait ce qu'il alimente.
@@ -626,7 +686,7 @@ impl Http {
         }
 
         // 8. Les paramètres, maintenant qu'on sait ce qu'ils visent.
-        if !requete_permise(resolu.resource, resolu.method, &requete) {
+        if !resolu.resource.requete_permise(resolu.method, &requete) {
             return Err((Reason::BadQuery, place_de_la_reponse));
         }
 
@@ -910,6 +970,38 @@ fn decimales(valeur: u16, out: &mut [u8; 5]) -> usize {
 
 /// Le nom du champ qui porte le type d'un contenu.
 const EN_TETE_TYPE: &[u8] = b"content-type";
+
+/// Le document OpenAPI de cette API, **embarqué à la compilation**.
+///
+/// # IL N'EST PAS ÉCRIT, IL EST ENGENDRÉ — ET IL N'EST PAS LU, IL EST EMBARQUÉ
+///
+/// `air-mail-admin openapi` l'engendre depuis la table de routage, et
+/// `scripts/check-openapi.sh` exige que le fichier commité soit celui que le
+/// code produit. Ce qui est servi ici est donc, par construction, ce que le
+/// serveur fait — et l'embarquer évite une lecture de fichier, que C1 interdit
+/// de toute façon à cette crate.
+const OPENAPI: &str = include_str!("../../../docs/openapi.json");
+
+/// L'`ETag` du document.
+///
+/// **C'EST LA VERSION DU SERVEUR, ET C'EST EXACT PLUTÔT QUE COMMODE.** Le
+/// document porte `info.version` : deux versions égales décrivent donc le même
+/// document, et `check-compile` exige déjà que le code et les pages de manuel
+/// annoncent la même. Un `ETag` fort (§8.8.3 de RFC 9110) se cite entre
+/// guillemets.
+const OPENAPI_ETAG: &[u8] = concat!("\"", env!("CARGO_PKG_VERSION"), "\"").as_bytes();
+
+/// Le nom de l'en-tête `ETag`.
+const EN_TETE_ETAG: &[u8] = b"etag";
+
+/// Le nom de l'en-tête `If-None-Match`.
+const EN_TETE_SI_AUCUN: &[u8] = b"if-none-match";
+
+/// Le nom de l'en-tête `Allow`.
+///
+/// **EN MINUSCULES** : §8.1.2 de RFC 9113 et §4.1.1 de RFC 9114 l'exigent, et
+/// une capitale ici serait une erreur de protocole sur les deux transports.
+const EN_TETE_ALLOW: &[u8] = b"allow";
 
 /// Ce qu'un nom d'appareil peut faire de long, une fois déséchappé.
 ///
@@ -1284,6 +1376,145 @@ fn champs_ordinaires<'o>(
         *place = Some(champ);
     }
     champs
+}
+
+/// Le document OpenAPI, ou un `304` si le client l'a déjà.
+///
+/// # ELLE N'EXIGE AUCUN JETON, ET LE `304` EST CE QUI LE REND TENABLE
+///
+/// Deux cent dix kibioctets rendus avant toute vérification, ce serait un
+/// robinet : mille requêtes par seconde feraient deux cents mégaoctets par
+/// seconde en sortie d'une machine dont le métier est le courrier.
+///
+/// Deux choses le bornent. Le garde (C8) compte cette requête comme toute autre,
+/// donc les seuils par source s'y appliquent. Et l'`ETag` fait qu'un client qui
+/// revient coûte un `304` de quelques octets — ce que tout outil OpenAPI fait,
+/// puisqu'il met le document en cache.
+///
+/// **UN `304` NE PORTE NI CORPS NI TYPE** (§15.3.5 de RFC 9110), et il reprend
+/// l'`ETag` pour que le client sache lequel il vient de valider.
+fn le_document<'o>(alt_svc: &'o [u8], tete: &RequestHead<'_>, sortie: &'o mut [u8]) -> Turn<'o> {
+    let _ = sortie;
+    // **UNE COMPARAISON D'OCTETS, ET RIEN DE PLUS.** §8.8.3.2 décrit une liste
+    // et un `*` ; cette ressource n'a qu'une représentation, et un client qui
+    // enverrait une liste n'obtiendra qu'un document entier — jamais une
+    // réponse fausse.
+    if tete.field(EN_TETE_SI_AUCUN) == Some(OPENAPI_ETAG) {
+        return Turn {
+            status: StatusCode::NOT_MODIFIED,
+            fields: champs_ordinaires(
+                StatusCode::NOT_MODIFIED,
+                alt_svc,
+                &[(EN_TETE_ETAG, OPENAPI_ETAG)],
+            ),
+            body: &[],
+            next: Next::Respond,
+        };
+    }
+    Turn {
+        status: StatusCode::OK,
+        fields: champs_ordinaires(
+            StatusCode::OK,
+            alt_svc,
+            &[
+                (EN_TETE_TYPE, JSON_MEDIA_TYPE.as_bytes()),
+                (EN_TETE_ETAG, OPENAPI_ETAG),
+            ],
+        ),
+        body: OPENAPI.as_bytes(),
+        next: Next::Respond,
+    }
+}
+
+/// Le refus d'une méthode, **avec son `Allow`**.
+///
+/// # §15.5.6 DE RFC 9110 EN FAIT UNE OBLIGATION
+///
+/// « The origin server MUST generate an Allow header field in a 405 response ».
+/// Ce serveur ne le faisait pas : `champs_ordinaires` énumère ce que toute
+/// réponse porte, et `allow` n'y figurait pour aucun statut. Un client recevait
+/// donc 405 sans savoir quoi essayer.
+///
+/// **IL N'Y A RIEN À CACHER ICI**, et c'est ce qui rend ce champ possible : ce
+/// refus n'arrive qu'APRÈS l'autorisation (point 5 de `decider`), pour la raison
+/// que son commentaire explique. Celui qui le lit a déjà le droit d'apprendre ce
+/// que la ressource sert.
+fn methode_refusee<'o>(
+    alt_svc: &'o [u8],
+    resource: Resource<'_>,
+    sortie: &'o mut [u8],
+) -> Turn<'o> {
+    let status = Reason::MethodNotAllowed.status();
+    let (place_de_l_allow, place_du_document) = couper(sortie, ams_api::ALLOW_OCTETS_MAX);
+    let permises = resource.allow(place_de_l_allow);
+    match problem(Reason::MethodNotAllowed, place_du_document) {
+        Ok(corps) => Turn {
+            status,
+            fields: champs_ordinaires(
+                status,
+                alt_svc,
+                &[
+                    (EN_TETE_TYPE, PROBLEM_MEDIA_TYPE.as_bytes()),
+                    (EN_TETE_ALLOW, permises),
+                ],
+            ),
+            body: corps,
+            next: Next::Respond,
+        },
+        // Le tampon ne suffit pas pour dire la faute : le code et l'`Allow`
+        // partent seuls. C'est le même repli que `refus`, et il garde ce qui
+        // tient dans un en-tête.
+        Err(_) => Turn {
+            status,
+            fields: champs_ordinaires(status, alt_svc, &[(EN_TETE_ALLOW, permises)]),
+            body: &[],
+            next: Next::Respond,
+        },
+    }
+}
+
+/// Ce que cette ressource sert, pour qui le demande par `OPTIONS`.
+///
+/// # ELLE NE DESCEND PAS DANS L'APPLICATION, ET C'EST TOUT L'OBJET
+///
+/// `Resource::serves` laissait passer `OPTIONS` — §9.3.7 la veut sur toute
+/// ressource qui existe —, puis aucun bras du dispatch d'`ams-server::api` ne la
+/// reconnaissait : la requête tombait sur son `_ => pas_encore` et rendait
+/// **501**. Le routeur disait oui, l'application disait « pas encore ».
+///
+/// Elle se répond donc ici, où la table de routage est encore sous la main et
+/// où il n'y a rien à consulter : la réponse ne dépend que du type.
+///
+/// # `204`, ET NON `200`
+///
+/// §9.3.7 permet les deux, et un corps n'apporterait rien que l'en-tête ne dise
+/// déjà. §15.3.5 interdit alors tout contenu, ce que `body: &[]` respecte.
+///
+/// # ELLE EXIGE UN JETON, COMME LE RESTE
+///
+/// `Resource::scope` demande la lecture pour `OPTIONS`, et l'autorisation passe
+/// avant. Ce n'est pas un oubli : `Allow` dit quelles méthodes existent sur un
+/// chemin, et le rendre à un inconnu ferait de ce routeur un annuaire public —
+/// très exactement ce que le point 5 de `decider` refuse. **UN SONDAGE CORS,
+/// LUI, EST SANS IDENTIFIANT** : il recevra donc 401, et c'est une décision à
+/// prendre le jour où CORS s'ouvrira, pas un effet de bord à subir ici.
+fn methodes_servies<'o>(
+    alt_svc: &'o [u8],
+    resource: Resource<'_>,
+    sortie: &'o mut [u8],
+) -> Turn<'o> {
+    let (place_de_l_allow, _) = couper(sortie, ams_api::ALLOW_OCTETS_MAX);
+    let permises = resource.allow(place_de_l_allow);
+    Turn {
+        status: StatusCode::NO_CONTENT,
+        fields: champs_ordinaires(
+            StatusCode::NO_CONTENT,
+            alt_svc,
+            &[(EN_TETE_ALLOW, permises)],
+        ),
+        body: &[],
+        next: Next::Respond,
+    }
 }
 
 /// La réponse qui va avec une faute.

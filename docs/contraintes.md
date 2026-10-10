@@ -6368,6 +6368,158 @@ sécurité tient à l'ORDRE des contrôles, et l'ordre ne se lit pas dans la tab
 qui les nomme — il se lit dans la fonction qui les appelle, ailleurs, dans une
 autre crate.
 
+## L'`Allow` de ce `405` n'existait pas, et `OPTIONS` rendait `501`
+
+La table ci-dessus écrit « **405** + `Allow` », et le commentaire de
+`Resource::allowed` annonce depuis l'origine : « **c'est ce qu'on écrit dans
+`Allow`**, et §15.5.6 de RFC 9110 en fait une obligation sur un 405 ». Celui de
+`resolve` ajoute : « `OPTIONS` s'applique à toute ressource qui existe (§9.3.7)
+».
+
+**AUCUN DES DEUX N'ÉTAIT TENU**, et cela a vécu jusqu'au 2026-10-09 :
+
+- `champs_ordinaires` d'`ams-session` énumère ce que TOUTE réponse porte —
+  `no-store`, `nosniff`, `www-authenticate` sur un 401, `alt-svc`. **`allow` n'y
+  figurait pour aucun statut.**
+- `Resource::serves` rend `true` pour `OPTIONS`, donc la requête échappait au
+  `405` ; puis aucun bras du dispatch d'`ams-server::api` ne la reconnaissait, et
+  elle tombait sur son `_ => pas_encore` : **`501`**. Le routeur disait oui,
+  l'application disait « pas encore ».
+
+### Comment cela s'est vu, et pourquoi pas plus tôt
+
+En engendrant le document OpenAPI. Il décrit les méthodes servies en lisant
+`allowed`, et il a donc décrit `OPTIONS` sur les quarante-cinq chemins et
+l'en-tête `Allow` sur les refus — **sur la foi de ces commentaires**. Une requête
+`curl -X OPTIONS` sur le banc d'intégration a rendu ceci :
+
+```text
+HTTP/2 204
+content-type: application/problem+json
+cache-control: no-store
+x-content-type-options: nosniff
+```
+
+Trois choses d'un coup. Pas d'`allow`. Un `content-type` de document d'erreur sur
+une réponse vide. Et un `204` qui venait de la correction en cours, non du code
+d'avant — lequel rendait `501`.
+
+**CE QUI A MASQUÉ LA FAUTE SI LONGTEMPS EST UN ACCESSEUR QUE SEULS LES ESSAIS
+LISAIENT.** `Turn::fields` n'était appelé par AUCUN code de production : les deux
+conducteurs rebâtissaient leur liste de champs, et celui d'HTTP/2 écrivait
+`PROBLEM_MEDIA_TYPE` pour tout `Next::Respond`. Les essais de session
+vérifiaient donc consciencieusement un jeu de champs que le fil ne voyait jamais.
+
+### Ce qui a été fait
+
+`Resource::allow` écrit la valeur de l'en-tête — `allowed`, plus `OPTIONS`, qui
+y figure puisqu'elle est servie — sans allouer et sans jamais couper un nom en
+deux. La session la pose sur le `405` et sur la réponse à `OPTIONS`, qu'elle
+répond elle-même par un `204` sans corps : la table de routage est encore sous la
+main, et il n'y a aucun magasin à consulter.
+
+`Turn` gagne `media()` et `allow()`, et **les deux conducteurs les lisent au lieu
+de deviner** : le type ne vient plus d'une supposition sur `Next::Respond`, et une
+réponse sans corps n'annonce plus de type. C'est la troisième fois que ces deux
+composeurs divergent, et la troisième fois que le remède est le même — une seule
+source, que les deux lisent.
+
+### Ce qui n'a PAS changé, et c'est voulu
+
+`OPTIONS` **exige un jeton**, comme le reste. `Allow` dit quelles méthodes
+existent sur un chemin : le rendre à un inconnu referait de ce routeur l'annuaire
+public que la section précédente a fermé. Un sondage préalable CORS, lui, est par
+définition sans identifiant — il recevra donc `401`, et **ouvrir CORS demandera
+de trancher cela**, soit par une réponse de sondage qui ne révèle rien de la
+ressource, soit en traitant le sondage avant l'autorisation. Ce n'est pas un
+effet de bord à subir ici.
+
+### La leçon, écrite pour la prochaine fois
+
+Trois commentaires affirmaient un comportement ; trois essais vérifiaient une
+structure interne ; une seule requête a montré la vérité. **Ce qui prouve qu'un
+en-tête part, c'est une réponse lue sur le fil** — et c'est pourquoi l'assertion
+qui garde cette tranche vit dans `crates/ams-server/tests/api.rs`, derrière un
+vrai `curl`, et non dans les essais de la session.
+
+## Découvrir n'est pas utiliser : `OPTIONS` et le document, sans jeton
+
+`OPTIONS` exigeait un jeton, et le document OpenAPI n'était pas servi. Le motif
+était celui de la section sur le `405` : `Allow` dit quelles méthodes existent
+sur un chemin, et le rendre à un inconnu referait de ce routeur un annuaire
+public.
+
+**DEUX MESURES ONT MONTRÉ QUE CE REFUS NE PROTÉGEAIT RIEN**, et les deux sont
+figées en essais plutôt qu'écrites ici seulement.
+
+### Ce qu'`OPTIONS` révèle : le gabarit, jamais l'objet
+
+`Resource::allowed` est un `match` sur la VARIANTE et ne consulte aucun magasin.
+
+| ressource | `Allow` rendu |
+|---|---|
+| `Mailbox { "INBOX" }` | `GET, HEAD, PUT, DELETE, OPTIONS` |
+| `Mailbox { "n-existe-pas" }` | `GET, HEAD, PUT, DELETE, OPTIONS` |
+| `Account { "ada" }` | `GET, HEAD, PUT, DELETE, OPTIONS` |
+| `Account { "fantome-total" }` | `GET, HEAD, PUT, DELETE, OPTIONS` |
+
+Essai : `l_allow_ne_depend_jamais_de_l_objet`. **Le jour où cela cesserait d'être
+vrai** — une boîte en lecture seule qui n'annoncerait pas `PUT`, ce qui paraît
+raisonnable —, `OPTIONS` deviendrait un oracle d'existence. Cet essai est ce qui
+l'empêche.
+
+### Ce qui est DÉJÀ public : la liste des gabarits
+
+Sans aucun jeton, aujourd'hui :
+
+| chemin | GET | PATCH | DELETE | |
+|---|---|---|---|---|
+| `/v1/health` | 401 | 401 | 401 | gabarit **connu** |
+| `/v1/accounts/ada` | 401 | 401 | 401 | gabarit **connu** |
+| `/v1/inconnu` | **404** | **404** | **404** | gabarit **inventé** |
+| `/v1/mailboxes/INBOX/zzz` | **404** | **404** | **404** | gabarit **inventé** |
+
+L'écart entre `401` et `404` énumère donc la surface des routes en une boucle,
+par n'importe qui. C'est inévitable dès que `resolve` tranche avant
+l'autorisation, et ce n'est pas un défaut : **ce qui doit rester caché est
+l'existence d'un OBJET**, et elle l'est — `/v1/accounts/<n'importe quoi>` rend
+`401` que le compte existe ou non. Essai :
+`ce_qu_un_inconnu_apprend_et_ce_qu_il_n_apprend_pas`.
+
+### Ce qui a été décidé, et par quoi c'est borné
+
+`OPTIONS` répond **sans jeton**, au point 4 ter de `decider` — avant
+l'autorisation, et non après. `/v1/openapi.json` se rend **sans jeton** aussi.
+
+Ce qui borne le coût d'une route publique de deux cent dix kibioctets :
+
+- le garde (C8) compte la requête comme toute autre, donc les seuils par source
+  s'y appliquent ;
+- un **`ETag`** fait qu'un client qui revient coûte un `304` de quelques octets
+  — et tout outil OpenAPI met le document en cache. L'`ETag` est **la version du
+  serveur**, ce qui est exact plutôt que commode : le document porte
+  `info.version`, donc deux versions égales décrivent le même document.
+
+### Et une quatrième divergence entre les deux conducteurs, trouvée en chemin
+
+Le document fait 210 Kio. `RENDU_OCTETS` valait **256 Kio en HTTP/2 et 64 Kio en
+HTTP/3** : une réponse de 100 Kio était donc servie sur un transport et refusée
+sur l'autre, la même requête et le même compte, pour un résultat qui dépendait du
+protocole choisi par le client. Les deux bornes sont désormais la même constante,
+et `const _: () = assert!(…)` l'exige à la compilation — comme pour les champs de
+toute réponse et la borne d'un message. **Ce tampon est unique pour tout le
+processus**, donc l'alignement coûte 192 Kio, une fois.
+
+### Ce qui reste à décider, et ce n'est pas technique
+
+**CORS.** Un sondage préalable est sans identifiant par définition ; `OPTIONS`
+répondant désormais sans jeton, il aboutirait. Ce qui manque est la liste des
+origines autorisées — et elle est vide aujourd'hui, aucun client de ce serveur ne
+tournant dans un navigateur. Les trois fautes à ne pas commettre le jour où elle
+ne le sera plus : `*` avec `Allow-Credentials` (inutile ici, l'API n'emploie
+aucun cookie), renvoyer l'`Origin` reçue sans la valider, et oublier
+`Vary: Origin`.
+
 ## POP3 répondait deux fois au `PASS`, et ne servait donc aucun client conforme
 
 Le 2026-09-05, `poplib` — le client POP3 de la bibliothèque standard de Python —

@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use ams_api::{JSON_MEDIA_TYPE, PROBLEM_MEDIA_TYPE, Scope};
+use ams_api::{JSON_MEDIA_TYPE, Scope};
 use ams_guard::{Event as GuardEvent, Source};
 use ams_h3::{Http3, Reponse, Transport};
 use ams_proto_http::{Method, RequestHead, StatusCode};
@@ -36,7 +36,22 @@ use crate::http::{Admission, Api, Door};
 const TRAVAIL_OCTETS: usize = 8 * 1024;
 
 /// Ce qu'une réponse servie par l'API peut faire.
-const RENDU_OCTETS: usize = 64 * 1024;
+///
+/// **IL VALAIT 64 KIO, CONTRE 256 EN HTTP/2.** Une réponse de 100 Kio était donc
+/// servie sur un transport et refusée sur l'autre — la même requête, le même
+/// compte, et un résultat qui dépendait du protocole que le client avait choisi.
+/// C'est la quatrième divergence trouvée entre ces deux composeurs, après les
+/// champs de toute réponse, ceux d'une partie de message, et le type de contenu.
+///
+/// **CE TAMPON EST UNIQUE POUR TOUT LE PROCESSUS** : il vit dans
+/// `Http3Application`, créée une fois, et non par connexion. Le porter à 256 Kio
+/// coûte donc 192 Kio au total, une fois.
+const RENDU_OCTETS: usize = crate::http::RENDU_OCTETS;
+
+// **ET LA COMPILATION L'EXIGE**, comme pour les champs et la borne d'un message :
+// deux bornes de réponse qui diffèrent sont deux API, et personne ne le voit en
+// lisant l'une des deux.
+const _: () = assert!(RENDU_OCTETS == crate::http::RENDU_OCTETS);
 
 /// Le pont entre HTTP/3 et une connexion QUIC.
 ///
@@ -169,8 +184,13 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
         // **UNE SEULE ADMISSION PAR REQUÊTE** : elle prend un jeton au seau de
         // l'appareil.
         let admission = crate::http::admettre(self.api, tour.next(), maintenant);
+        // **CE QUE LA SESSION A DÉJÀ DÉCIDÉ NE SE DEVINE PAS ICI**, et ce
+        // composeur-ci avait déjà payé une liste écrite à part : la sienne ne
+        // portait ni `no-store`, ni `nosniff`, ni le `www-authenticate` d'un
+        // refus.
+        let permises = tour.allow();
         let (status, media, a_ecrire) = match tour.next() {
-            Next::Respond => (tour.status(), PROBLEM_MEDIA_TYPE, tour.body()),
+            Next::Respond => (tour.status(), tour.media(), tour.body()),
             Next::CheckCredentials { login, password } => {
                 let accorde = self.api.authenticate(login, password);
                 // **L'IDENTIFIANT SE TIRE UNE FOIS**, et il sert deux fois : à sceller
@@ -351,6 +371,7 @@ impl<A: Api> ams_h3::Service for ServiceH3<'_, A> {
         composer(
             status,
             (media, piece),
+            permises,
             portee,
             a_ecrire,
             sans_corps,
@@ -384,9 +405,18 @@ const _: () = assert!(ams_h3::CORPS_OCTETS_MAX == ams_session::http::MESSAGE_OCT
 /// ne voit pas. `sortie` est le seul endroit dont la durée de vie convienne à la
 /// réponse qu'on rend — et l'y écrire est ce qui permet de la référencer sans
 /// la tenir deux fois.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "une réponse HTTP/3 demande le code, le type, la disposition d'une \
+              partie, l'`Allow`, la portée, le corps, de savoir s'il faut \
+              l'écrire, l'alternative de service et le tampon où tout recopier. \
+              Les regrouper masquerait ce que chacun décide, et ce composeur a \
+              déjà payé une liste écrite à part."
+)]
 fn composer<'o>(
     status: StatusCode,
     (media, piece): (&str, Option<&str>),
+    permises: &[u8],
     portee: (bool, Option<crate::http::ContentRange>),
     corps: &[u8],
     sans_corps: bool,
@@ -448,7 +478,11 @@ fn composer<'o>(
     let disposition = piece.unwrap_or_default().as_bytes();
     let apres_type = apres_alt.saturating_add(media.len());
     let apres_piece = apres_type.saturating_add(disposition.len());
-    let tout_tient = apres_piece <= sortie.len();
+    // **ET L'`Allow` DERRIÈRE LA DISPOSITION**, pour la même raison que tout ce
+    // qui précède : il vit dans le tampon de la session, dont la durée de vie ne
+    // se prouve pas plus longue que la réponse.
+    let apres_allow = apres_piece.saturating_add(permises.len());
+    let tout_tient = apres_allow <= sortie.len();
     if tout_tient {
         sortie
             .get_mut(apres_alt..apres_type)
@@ -458,6 +492,10 @@ fn composer<'o>(
             .get_mut(apres_type..apres_piece)
             .unwrap_or_default()
             .copy_from_slice(disposition);
+        sortie
+            .get_mut(apres_piece..apres_allow)
+            .unwrap_or_default()
+            .copy_from_slice(permises);
     }
 
     let (corps_rendu, reste) = sortie.split_at_mut(combien);
@@ -465,14 +503,23 @@ fn composer<'o>(
     let (portee_dite, apres) = suite.split_at(dits.min(suite.len()));
     let (alt_dite, apres) = apres.split_at(alt_svc.len().min(apres.len()));
     let (type_dit, apres) = apres.split_at(media.len().min(apres.len()));
-    let piece_dite = apres.get(..disposition.len()).unwrap_or_default();
+    let (piece_dite, apres) = apres.split_at(disposition.len().min(apres.len()));
+    let allow_dit = apres.get(..permises.len()).unwrap_or_default();
     let type_dit = match tout_tient {
         true => type_dit,
         false => b"application/octet-stream",
     };
-    let mut reponse = Reponse::new(status, corps_rendu)
-        .avec_champ(b"content-type", type_dit)
-        .avec_champ(b"content-length", longueur);
+    let mut reponse = Reponse::new(status, corps_rendu).avec_champ(b"content-length", longueur);
+    // **UNE RÉPONSE SANS CORPS N'ANNONCE PAS DE TYPE.** Ce champ était écrit
+    // sans condition, et un `204` d'`OPTIONS` partait donc avec un
+    // `content-type` qui ne décrivait rien.
+    if !media.is_empty() {
+        reponse = reponse.avec_champ(b"content-type", type_dit);
+    }
+    // §15.5.6 de RFC 9110 sur un `405`, §9.3.7 sur la réponse à `OPTIONS`.
+    if !allow_dit.is_empty() {
+        reponse = reponse.avec_champ(b"allow", allow_dit);
+    }
     // **CE QUE TOUTE RÉPONSE PORTE VIENT DE LA SESSION.** Ce composeur écrivait
     // sa propre liste, et elle avait divergé : ni `no-store` (§5.2.2.5 de
     // RFC 9111), ni `nosniff`, ni le `www-authenticate` d'un refus (§3 de
@@ -641,6 +688,7 @@ mod tests {
         let reponse = super::composer(
             status,
             ("application/json", None),
+            &[],
             (false, None),
             b"{}",
             false,
@@ -651,6 +699,90 @@ mod tests {
             .fields()
             .map(|(nom, _)| std::string::String::from_utf8_lossy(nom).into_owned())
             .collect()
+    }
+
+    /// Les champs d'une réponse composée, nom et valeur.
+    fn champs(
+        status: StatusCode,
+        media: &str,
+        permises: &[u8],
+        corps: &[u8],
+    ) -> std::vec::Vec<(std::string::String, std::string::String)> {
+        let mut sortie = [0_u8; 512];
+        let reponse = super::composer(
+            status,
+            (media, None),
+            permises,
+            (false, None),
+            corps,
+            false,
+            b"",
+            &mut sortie,
+        );
+        reponse
+            .fields()
+            .map(|(nom, valeur)| {
+                (
+                    std::string::String::from_utf8_lossy(nom).into_owned(),
+                    std::string::String::from_utf8_lossy(valeur).into_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// **`Allow` ARRIVE JUSQU'AU FIL EN HTTP/3 AUSSI**, et sans type sur un 204.
+    ///
+    /// # CE QUE CET ESSAI GARDE FERMÉ
+    ///
+    /// Les deux composeurs de cette API n'ont pas une ligne en commun, et celui
+    /// d'HTTP/3 a déjà divergé une fois : sa liste de champs ne portait ni
+    /// `no-store`, ni `nosniff`, ni le `www-authenticate` d'un refus. L'`Allow`
+    /// d'un `405` et celui d'`OPTIONS` passent par ici ; un essai qui ne
+    /// regarderait que la session ne verrait pas qu'ils s'y perdent.
+    ///
+    /// Et c'est arrivé : l'essai de session passait, pendant que le fil ne
+    /// portait pas l'en-tête — les conducteurs ignoraient `Turn::fields`.
+    #[test]
+    fn l_allow_arrive_jusqu_au_fil() {
+        // La réponse à `OPTIONS` : 204, aucun corps, aucun type, un `Allow`.
+        let rendus = champs(StatusCode::NO_CONTENT, "", b"GET, HEAD, OPTIONS", b"");
+        assert!(
+            rendus
+                .iter()
+                .any(|(nom, valeur)| nom == "allow" && valeur == "GET, HEAD, OPTIONS"),
+            "l'`Allow` manque : {rendus:?}"
+        );
+        assert!(
+            !rendus.iter().any(|(nom, _)| nom == "content-type"),
+            "un 204 sans corps n'annonce pas de type : {rendus:?}"
+        );
+
+        // Le refus d'une méthode : 405, un document, un type, et le même `Allow`.
+        let rendus = champs(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "application/problem+json",
+            b"GET, HEAD, OPTIONS",
+            b"{}",
+        );
+        assert!(
+            rendus
+                .iter()
+                .any(|(nom, valeur)| nom == "allow" && valeur == "GET, HEAD, OPTIONS"),
+            "un 405 doit porter son `Allow` : {rendus:?}"
+        );
+        assert!(
+            rendus
+                .iter()
+                .any(|(nom, valeur)| nom == "content-type" && valeur == "application/problem+json"),
+            "un refus garde son type : {rendus:?}"
+        );
+
+        // Et sans `Allow`, aucun champ `allow` n'est écrit.
+        let rendus = champs(StatusCode::OK, "application/json", b"", b"{}");
+        assert!(
+            !rendus.iter().any(|(nom, _)| nom == "allow"),
+            "un `Allow` vide ne s'écrit pas : {rendus:?}"
+        );
     }
 
     /// **UNE PARTIE DE MESSAGE PORTE SON TYPE, SA DISPOSITION ET SA POLITIQUE** :
@@ -664,6 +796,7 @@ mod tests {
                 "text/html; charset=utf-8",
                 Some("attachment; filename=\"x.html\""),
             ),
+            &[],
             (true, None),
             b"<p>x</p>",
             false,
@@ -706,6 +839,7 @@ mod tests {
         let reponse = super::composer(
             StatusCode::OK,
             ("text/html", Some("attachment")),
+            &[],
             (false, None),
             &corps,
             false,
@@ -718,6 +852,7 @@ mod tests {
         let reponse = super::composer(
             StatusCode::OK,
             ("application/un-type-bien-trop-long-pour-tenir", None),
+            &[],
             (false, None),
             &corps,
             false,
@@ -801,6 +936,7 @@ mod tests {
         let reponse = super::composer(
             StatusCode::UNAUTHORIZED,
             ("application/json", None),
+            &[],
             portee,
             b"{}",
             false,

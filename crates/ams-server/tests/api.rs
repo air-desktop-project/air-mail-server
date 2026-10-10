@@ -2313,6 +2313,37 @@ fn le_journal_d_audit_dit_les_sessions_et_les_refus() {
         .map(|(jeton, _)| jeton.to_string())
         .unwrap_or_else(|| panic!("un jeton dans {corps}"));
 
+    // ── 1 bis. `OPTIONS` RÉPOND, ET SON `Allow` ARRIVE JUSQU'AU CLIENT ──────
+    //
+    // **LA SEULE MESURE QUI VAILLE EST CELLE-CI**, et c'est la leçon du
+    // 2026-10-09 : le commentaire de `Resource::allowed` annonçait « c'est ce
+    // qu'on écrit dans `Allow` » depuis l'origine, et rien ne l'écrivait ;
+    // `Resource::serves` laissait passer `OPTIONS`, et l'application rendait
+    // 501. Les deux fautes étaient invisibles dans le code, qui les disait
+    // tenues. Une requête les montre.
+    let tour = lire(&jeton, "/v1/me/audit", "OPTIONS");
+    assert!(
+        tour.contains(" 204"),
+        "`OPTIONS` devrait rendre 204, pas ceci :\n{tour}"
+    );
+    assert!(
+        tour.to_ascii_lowercase()
+            .contains("allow: get, head, options"),
+        "`OPTIONS` devrait porter son `Allow` :\n{tour}"
+    );
+    // §15.5.6 de RFC 9110 : un 405 le porte aussi.
+    let refuse = lire(&jeton, "/v1/me/audit", "POST");
+    assert!(
+        refuse.contains(" 405"),
+        "un `POST` sur le journal devrait rendre 405 :\n{refuse}"
+    );
+    assert!(
+        refuse
+            .to_ascii_lowercase()
+            .contains("allow: get, head, options"),
+        "un 405 devrait porter son `Allow` :\n{refuse}"
+    );
+
     // ── 2. LE TITULAIRE LIT SON JOURNAL, LE PLUS RÉCENT D'ABORD ─────────────
     //
     // L'écriture passe par un fil : on laisse la file se vider.

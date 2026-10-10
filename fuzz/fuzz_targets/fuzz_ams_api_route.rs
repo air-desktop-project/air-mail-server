@@ -91,6 +91,38 @@ const fn modifie(method: Method) -> bool {
     )
 }
 
+/// Les ressources qui n'exigent **aucune** portée, et les deux raisons distinctes
+/// qui les y mettent.
+///
+/// **UNE SEULE LISTE, LUE DANS LES DEUX SENS** par la propriété 5. Elle vivait en
+/// deux copies — l'une pour le cas `None`, l'autre pour le cas `Some` — et deux
+/// copies d'une même vérité dérivent un jour l'une de l'autre, sans que rien ne le
+/// dise. D'où cette fonction : le sens « absente d'ici, donc elle ne doit pas être
+/// publique » et le sens « présente ici, donc elle ne doit rien exiger » lisent
+/// désormais le même texte.
+///
+/// **Quatre portes d'entrée.** `Tokens`, `Devices`, `Sessions`, `SessionChallenge` :
+/// ce qui autorise est dans le CORPS — des identifiants pour l'une, une invitation
+/// scellée pour l'autre — et non dans un jeton qu'on n'a pas encore.
+///
+/// **Une description, et ce n'est pas la même chose.** `OpenApi` n'est pas une porte :
+/// c'est le contrat de l'API, servi en lecture seule (`allowed()` le borne à `GET` et
+/// `HEAD`). **Décision du BDFL du 2026-10-10**, prise en connaissance de l'échange :
+/// un lecteur sans jeton apprend *toutes* les routes du serveur, contre un client qui
+/// se configure sans en demander un. Le serveur dit la même chose au même endroit —
+/// `Resource::scope` dans `ams-api/src/route.rs` : « ce n'est pas une porte, c'est une
+/// description ; découvrir n'est pas utiliser ».
+fn sans_portee(resource: Resource<'_>) -> bool {
+    matches!(
+        resource,
+        Resource::Tokens
+            | Resource::Devices
+            | Resource::Sessions
+            | Resource::SessionChallenge
+            | Resource::OpenApi
+    )
+}
+
 fuzz_target!(|entree: Entree| {
     let method = methode(entree.methode);
     let (chemin, requete) = split_query(entree.cible);
@@ -129,36 +161,19 @@ fuzz_target!(|entree: Entree| {
         );
     }
 
-    // PROPRIÉTÉ 5 : toute ressource exige une portée, SAUF LES DEUX PORTES
-    // D'ENTRÉE — celle où l'on obtient un jeton, et celle où l'on enrôle un
-    // appareil. Ce qui les autorise est dans le CORPS : des identifiants pour
-    // l'une, une invitation scellée pour l'autre.
-    //
-    // **CETTE LISTE EST EXACTE DANS LES DEUX SENS**, et c'est tout son intérêt :
-    // une ressource qui cesserait d'exiger une portée sans figurer ici ouvrirait
-    // une porte publique que personne n'aurait voulue. Elle a d'ailleurs attrapé
-    // l'inverse — `/v1/devices` ajouté sans que cet oracle le sache.
+    // PROPRIÉTÉ 5 : toute ressource exige une portée, sauf celles que
+    // `sans_portee` énumère — et cette fonction est lue DANS LES DEUX SENS,
+    // ci-dessous. Une ressource qui cesserait d'exiger une portée sans y figurer
+    // ouvrirait une porte publique que personne n'aurait voulue ; une ressource
+    // qui y figure et se mettrait à en exiger une se dénoncerait de même. Cet
+    // oracle a déjà attrapé les deux cas : `/v1/devices` ajouté sans qu'il le
+    // sache, puis `/v1/openapi.json` le 2026-10-10.
     match resolu.scope {
-        None => assert!(
-            matches!(
-                resource,
-                Resource::Tokens
-                    | Resource::Devices
-                    | Resource::Sessions
-                    | Resource::SessionChallenge
-            ),
-            "{resource:?} n'exige aucune portée"
-        ),
+        None => assert!(sans_portee(resource), "{resource:?} n'exige aucune portée"),
         Some(portee) => {
             assert!(
-                !matches!(
-                    resource,
-                    Resource::Tokens
-                        | Resource::Devices
-                        | Resource::Sessions
-                        | Resource::SessionChallenge
-                ),
-                "une porte d'entrée exige une portée"
+                !sans_portee(resource),
+                "{resource:?} ne devrait exiger aucune portée, et en exige une"
             );
             // PROPRIÉTÉ 6 : la lecture ne donne jamais l'écriture.
             let ecrit = Area::TOUS
@@ -462,6 +477,7 @@ fn segments_de(
         }
         Resource::Health => pousser("health"),
         Resource::Metrics => pousser("metrics"),
+        Resource::OpenApi => pousser("openapi.json"),
     }
     segments
 }

@@ -63,6 +63,7 @@
 extern crate std;
 
 mod base64url;
+mod catalogue;
 mod challenge;
 mod error;
 mod invitation;
@@ -79,6 +80,7 @@ mod token;
 // le client a écrite ; il n'écrit rien en base64url de son côté, et exporter
 // ce dont personne ne se sert donnerait une surface à maintenir pour rien.
 pub use base64url::decode as decode_base64url;
+pub use catalogue::{CATALOGUE, Entree};
 pub use error::{Error, Reason};
 pub use json::{DEPTH_MAX, FIELDS_MAX as JSON_FIELDS_MAX, Json};
 pub use path::{SEGMENT_OCTETS_MAX, SEGMENTS_MAX, Segments, split_query};
@@ -87,7 +89,7 @@ pub use problem::{
 };
 pub use query::{Query, parse_query};
 pub use reader::{BODY_DEPTH_MAX, Event, FIELDS_MAX, Number, Reader, Str};
-pub use route::{Resolved, Resource, resolve};
+pub use route::{ALLOW_OCTETS_MAX, Resolved, Resource, resolve};
 pub use scope::{Area, Rights, Scope};
 pub use token::{
     ENCODED_OCTETS_MAX, KEY_OCTETS_MIN, Key, KeyProblem, LIFETIME_MAX_US, LOGIN_OCTETS_MAX,

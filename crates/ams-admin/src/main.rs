@@ -23,6 +23,7 @@ use ams_config::{Configuration, Enforcement};
 use ams_admin_options::{Demande, OPTIONS_AIDE};
 
 mod asl;
+mod openapi;
 
 /// Le texte de `--help`.
 const AIDE: &str = "\
@@ -54,6 +55,15 @@ COMMANDES
     config show [<fichier>]
                         relit une configuration et l'affiche. SANS ARGUMENT,
                         /var/lib/air-mail/air-mail.conf.
+    openapi             écrit sur la sortie standard le document OpenAPI 3.1
+                        de l'API REST de ce binaire.
+                        IL NE PREND AUCUN FICHIER : il ne décrit pas CETTE
+                        installation, mais l'API que cette version sert. Les
+                        chemins, les méthodes et la portée exigée par opération
+                        sont LUS sur la table de routage — ils ne peuvent donc
+                        pas s'en écarter.
+                        Il ne décrit PAS les schémas de corps ni les codes de
+                        succès exacts, et il le dit de lui-même.
     account add <fichier> --login <nom> [--address <adresse>]...
                         ajoute ou remplace un compte. LE MOT DE PASSE SE LIT SUR
                         L'ENTRÉE STANDARD, jamais sur la ligne de commande : ce
@@ -814,6 +824,13 @@ fn main() -> ExitCode {
         ["config", "write", fichier, reste @ ..] => ecrire(Path::new(fichier), reste),
         ["config", "show", fichier] => montrer(Path::new(fichier)),
         ["config", "show"] => montrer(&configuration_par_defaut()),
+        // **ELLE N'OUVRE AUCUN FICHIER ET NE LIT AUCUNE CONFIGURATION** : le
+        // document ne décrit pas CETTE installation, il décrit l'API que ce
+        // binaire sert. Lui demander un chemin laisserait croire le contraire.
+        ["openapi"] => {
+            print!("{}", openapi::document());
+            ExitCode::SUCCESS
+        }
         ["account", "add", fichier, "--login", nom, reste @ ..] => match demande_de_compte(reste) {
             Ok((adresses, scram)) => ajouter(Path::new(fichier), nom, &adresses, scram.as_ref()),
             Err(message) => {

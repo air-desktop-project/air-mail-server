@@ -34,10 +34,18 @@ use ams_proto_http::Method;
 
 use crate::error::{Error, Reason};
 use crate::path::{Segments, decode};
+use crate::query::Query;
 use crate::scope::{Area, Rights, Scope};
 
 /// La version d'API que porte le chemin.
 pub const VERSION: &str = "v1";
+
+/// De quoi écrire la valeur d'`Allow` la plus longue, avec de la marge.
+///
+/// `GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS` fait quarante-quatre octets.
+/// Aucune ressource ne sert les sept, mais la borne ne se calcule pas sur ce
+/// qu'on sert aujourd'hui — elle se calcule sur ce que le type peut produire.
+pub const ALLOW_OCTETS_MAX: usize = 64;
 
 /// Ce qu'un chemin désigne.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +376,33 @@ pub enum Resource<'o> {
 
     /// `/v1/health` — le serveur répond-il ?
     Health,
+    /// `/v1/openapi.json` — **ce que cette API fait**, et non ce qu'elle a.
+    ///
+    /// # DÉCOUVRIR N'EST PAS UTILISER, ET CELLE-CI N'EXIGE DONC RIEN
+    ///
+    /// Un document OpenAPI décrit l'API comme un PRODUIT : les mêmes chemins
+    /// pour tout appelant, à toute heure, quelle que soit l'installation. Il ne
+    /// nomme aucun compte, aucune boîte, aucun domaine, aucun réglage — il est à
+    /// cette API ce qu'une page de manuel est à une commande.
+    ///
+    /// **ET CE QU'IL PUBLIE EST DÉJÀ PUBLIC.** Mesuré : sans jeton, un chemin
+    /// qui existe rend `401` et un chemin inventé rend `404`. La surface des
+    /// routes s'énumère donc en une boucle, par n'importe qui. Exiger un jeton
+    /// ici n'aurait caché que la commodité.
+    ///
+    /// # CE QU'ELLE COÛTE, ET CE QUI LE BORNE
+    ///
+    /// Deux cent dix kibioctets rendus sans vérifier de jeton, ce serait un
+    /// robinet. Deux choses le ferment : le garde (C8) compte cette requête
+    /// comme toute autre — les seuils par source s'y appliquent —, et un `ETag`
+    /// fait qu'une relecture coûte un `304` de quelques octets.
+    ///
+    /// **L'`ETag` EST LA VERSION DU SERVEUR**, et c'est exact plutôt que
+    /// commode : le document porte `info.version`, donc deux versions égales
+    /// décrivent le même document, et `check-compile` exige déjà que les pages
+    /// de manuel et le code annoncent la même.
+    OpenApi,
+
     /// `/v1/metrics` — les compteurs.
     Metrics,
 }
@@ -375,8 +410,14 @@ pub enum Resource<'o> {
 impl Resource<'_> {
     /// La portée qu'il faut pour l'atteindre avec cette méthode.
     ///
-    /// `None` pour ce qui ne demande aucune portée — c'est-à-dire l'échange de
-    /// jeton, et lui seul.
+    /// `None` pour ce qui ne demande aucune portée. **Cinq ressources, pas une** —
+    /// cette ligne disait « l'échange de jeton, et lui seul » alors que quatre
+    /// autres étaient déjà dans ce cas : les quatre portes d'entrée (`Tokens`,
+    /// `Devices`, `Sessions`, `SessionChallenge`), dont le corps porte ce qui
+    /// autorise, et `OpenApi`, qui n'est pas une porte mais une description. Le
+    /// compte exact est tenu dans les deux sens par la propriété 5 de
+    /// `fuzz_ams_api_route` ; c'est elle qui a refusé `OpenApi` tant que personne
+    /// ne l'avait déclarée.
     ///
     /// # LA MÉTHODE DÉCIDE DU DROIT, LA RESSOURCE DU DOMAINE
     ///
@@ -394,6 +435,10 @@ impl Resource<'_> {
             Self::Tokens | Self::Devices | Self::SessionChallenge | Self::Sessions => {
                 return None;
             }
+            // **NI CELLE-CI**, pour une autre raison : ce n'est pas une porte,
+            // c'est une description. Découvrir n'est pas utiliser, et ce qu'elle
+            // publie est déjà énumérable sans jeton.
+            Self::OpenApi => return None,
             // Révoquer son propre jeton ne demande que de l'avoir.
             Self::CurrentToken
             | Self::OwnPassword
@@ -477,9 +522,12 @@ impl Resource<'_> {
             // **ELLE NE S'ÉCRIT PAS** : le journal se déduit de la boîte, il ne
             // se pose pas.
             Self::Changes { .. } => &[Method::Get, Method::Head],
-            Self::Mailboxes | Self::Domains | Self::Bans | Self::Health | Self::Metrics => {
-                &[Method::Get, Method::Head]
-            }
+            Self::Mailboxes
+            | Self::Domains
+            | Self::Bans
+            | Self::Health
+            | Self::Metrics
+            | Self::OpenApi => &[Method::Get, Method::Head],
             Self::Mailbox { .. } => &[Method::Get, Method::Head, Method::Put, Method::Delete],
             Self::Messages { .. } => &[Method::Get, Method::Head, Method::Post],
             Self::Message { .. } => &[Method::Get, Method::Head, Method::Patch, Method::Delete],
@@ -516,6 +564,170 @@ impl Resource<'_> {
         // `OPTIONS` s'applique à toute ressource qui existe (§9.3.7) : c'est le
         // moyen normalisé de demander ce que `allowed` rend.
         matches!(method, Method::Options) || self.allowed().contains(&method)
+    }
+
+    /// Cette ressource accepte-t-elle ces paramètres, sous ce verbe ?
+    ///
+    /// # ELLE VIVAIT DANS `ams-session`, ET C'ÉTAIT UNE TABLE DE TROP
+    ///
+    /// Une fonction libre, à côté de la boucle HTTP, qui disait d'une ressource
+    /// ce que cette énumération dit déjà de toutes les autres — portée, méthodes.
+    /// Elle a été déplacée ici SANS CHANGER UNE LIGNE de sa logique, pour la même
+    /// raison que `scope` y vit : **ce qu'une ressource accepte se lit sur la
+    /// ressource**, d'un seul endroit.
+    ///
+    /// Et cela rend la règle ÉNUMÉRABLE : le document OpenAPI la sonde — un
+    /// paramètre à la fois — au lieu de la recopier. Une API documentée qui
+    /// mentirait sur ses paramètres de requête est redevenue impossible.
+    ///
+    /// **TROIS RESSOURCES EN PRENNENT, EN LECTURE SEULEMENT** : la liste des
+    /// messages (`before`, `limit`), le journal des changements (`since`,
+    /// EXIGÉ, et `limit`) et le journal d'audit (`limit`). Ailleurs, un paramètre est refusé plutôt qu'ignoré : un
+    /// client qui croit filtrer ce qui ne l'est pas ne s'en apercevrait jamais.
+    pub const fn requete_permise(self, verbe: Method, requete: &Query) -> bool {
+        let lecture = matches!(verbe, Method::Get | Method::Head);
+        match self {
+            Self::Messages { .. } => requete.is_empty() || (lecture && requete.since.is_none()),
+            // **`since` EST EXIGÉ** : une synchronisation incrémentale part de
+            // quelque part. Sans lui, la réponse serait « tout » — ce que la liste
+            // des messages rend déjà, et mieux.
+            Self::Changes { .. } => requete.since.is_some() && requete.before.is_none(),
+            // Le journal d'audit ne se lit que par la fin : `limit`, et rien d'autre.
+            Self::OwnAudit | Self::AccountAudit { .. } => {
+                requete.before.is_none() && requete.since.is_none()
+            }
+            _ => requete.is_empty(),
+        }
+    }
+
+    /// Écrit la valeur de l'en-tête `Allow` de cette ressource dans `place`.
+    ///
+    /// # §15.5.6 DE RFC 9110 EN FAIT UNE OBLIGATION SUR UN 405
+    ///
+    /// « The origin server MUST generate an Allow header field in a 405
+    /// response ». Sans lui, un client qui reçoit 405 sait qu'il s'est trompé
+    /// mais pas de quoi — et réessaiera le chemin ET le verbe, ce qui double le
+    /// trafic pour rien.
+    ///
+    /// Le commentaire d'[`Self::allowed`] annonçait « c'est ce qu'on écrit dans
+    /// `Allow` » depuis l'origine. **RIEN NE L'ÉCRIVAIT** : `champs_ordinaires`
+    /// d'`ams-session` énumère ce que toute réponse porte, et `allow` n'y était
+    /// pas, pour aucun statut. L'intention était juste, et tenue par personne.
+    ///
+    /// # `OPTIONS` Y FIGURE, ET [`Self::allowed`] NE LA LISTE PAS
+    ///
+    /// Les deux sont vrais en même temps, et ce n'est pas une incohérence.
+    /// `allowed` dit les droits qu'on a SUR la ressource ; `OPTIONS` n'en est
+    /// pas un, c'est le moyen de demander lesquels le sont (§9.3.7). Mais
+    /// `Allow` énumère ce qu'on peut ENVOYER, et `OPTIONS` en fait partie
+    /// puisqu'elle est servie : l'omettre dirait à un client de ne pas poser la
+    /// question à laquelle on vient de répondre.
+    ///
+    /// # ELLE N'ALLOUE PAS, ET ELLE NE TRONQUE PAS EN SILENCE
+    ///
+    /// La valeur la plus longue que cette API puisse produire fait
+    /// quarante-quatre octets ; [`ALLOW_OCTETS_MAX`] en réserve davantage. Si
+    /// `place` ne suffisait pourtant pas, ce qui est écrit s'arrête sur une
+    /// méthode entière — jamais au milieu d'un nom, qui donnerait un en-tête
+    /// qu'un client lirait de travers.
+    #[must_use]
+    pub fn allow(self, place: &mut [u8]) -> &[u8] {
+        let mut ecrit = 0_usize;
+        for method in self
+            .allowed()
+            .iter()
+            .copied()
+            .chain(core::iter::once(Method::Options))
+        {
+            let nom = method.as_bytes();
+            // **UNE SEULE VÉRIFICATION DE BORNES, ET C'EST LA GARDE.** Deux
+            // `if let Some(…)` successifs en faisaient trois, dont deux que la
+            // première rendait inatteignables : du code défensif que rien ne
+            // pouvait éprouver, et que C2 compte comme non couvert à juste
+            // titre — une branche qu'aucun essai n'atteint est une branche dont
+            // personne ne sait ce qu'elle fait.
+            let separe: &[u8] = match ecrit {
+                0 => b"",
+                _ => b", ",
+            };
+            let fin = ecrit.saturating_add(separe.len()).saturating_add(nom.len());
+            let Some(cible) = place.get_mut(ecrit..fin) else {
+                break;
+            };
+            let (devant, derriere) = cible.split_at_mut(separe.len().min(cible.len()));
+            devant.copy_from_slice(separe);
+            derriere.copy_from_slice(nom);
+            ecrit = fin;
+        }
+        place.get(..ecrit).unwrap_or_default()
+    }
+
+    /// Son rang dans [`crate::catalogue::CATALOGUE`].
+    ///
+    /// # CE `match` EST LA GARDE DU CATALOGUE
+    ///
+    /// Il est exhaustif : **ajouter une ressource sans lui donner de rang ne
+    /// compile pas**. Et l'essai qui exige que les rangs du catalogue soient
+    /// exactement `0..len`, chacun une fois, échoue si la nouvelle ressource n'y
+    /// est pas décrite.
+    ///
+    /// C'est ce qui rend impossible la panne ordinaire d'une documentation
+    /// d'API : une route servie que le document ne mentionne pas. Ici, elle ne
+    /// se compile pas, puis elle ne passe pas les essais.
+    ///
+    /// **CE RANG N'A AUCUN SENS AU-DEHORS.** Ce n'est ni un identifiant stable,
+    /// ni un ordre de tri : c'est une place dans un tableau, et elle change
+    /// quand le tableau change.
+    #[must_use]
+    pub const fn rang(self) -> usize {
+        match self {
+            Self::Tokens => 0,
+            Self::CurrentToken => 1,
+            Self::SessionChallenge => 2,
+            Self::Sessions => 3,
+            Self::Devices => 4,
+            Self::Invitations => 5,
+            Self::OwnPassword => 6,
+            Self::OwnDevices => 7,
+            Self::OwnDevice { .. } => 8,
+            Self::OwnPush => 9,
+            Self::OwnAppPasswords => 10,
+            Self::OwnAppPassword { .. } => 11,
+            Self::OwnDelegations => 12,
+            Self::OwnAudit => 13,
+            Self::Mailboxes => 14,
+            Self::Mailbox { .. } => 15,
+            Self::Messages { .. } => 16,
+            Self::Message { .. } => 17,
+            Self::MessageRaw { .. } => 18,
+            Self::MessagePart { .. } => 19,
+            Self::Changes { .. } => 20,
+            Self::Search { .. } => 21,
+            Self::Copy { .. } => 22,
+            Self::Move { .. } => 23,
+            Self::Drafts => 24,
+            Self::Draft { .. } => 25,
+            Self::DraftAttachments { .. } => 26,
+            Self::DraftAttachment { .. } => 27,
+            Self::DraftSend { .. } => 28,
+            Self::DraftStore { .. } => 29,
+            Self::Submissions => 30,
+            Self::Accounts => 31,
+            Self::Account { .. } => 32,
+            Self::AccountPassword { .. } => 33,
+            Self::AccountAddresses { .. } => 34,
+            Self::Delegates { .. } => 35,
+            Self::Delegate { .. } => 36,
+            Self::AccountDevices { .. } => 37,
+            Self::AccountDevice { .. } => 38,
+            Self::AccountAudit { .. } => 39,
+            Self::Domains => 40,
+            Self::Bans => 41,
+            Self::Ban { .. } => 42,
+            Self::Health => 43,
+            Self::Metrics => 44,
+            Self::OpenApi => 45,
+        }
     }
 }
 
@@ -699,6 +911,7 @@ fn designer<'o>(segments: &Segments<'o>) -> Result<Resource<'o>, Error> {
         }),
         ("health", 2) => Ok(Resource::Health),
         ("metrics", 2) => Ok(Resource::Metrics),
+        ("openapi.json", 2) => Ok(Resource::OpenApi),
         _ => Err(manque),
     }
 }
