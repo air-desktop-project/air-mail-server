@@ -75,29 +75,37 @@ fi
 
 # ── 3. Ce que la compilation a réellement produit ───────────────────────────
 #
-# Les deux contrôles précédents lisent des NOMS. Celui-ci regarde le disque : un
-# objet C sous `target/*/build` veut dire qu'un compilateur C a tourné, quel que
-# soit le nom de la crate qui l'a demandé. C'est la seule des trois qui ne se
-# laisse pas contourner par un nom bien choisi.
+# Les deux contrôles précédents lisent des NOMS. Celui-ci regarde le disque.
+#
+# **IL MESURE LA PROVENANCE, IL NE LA DÉDUIT PLUS DU CHEMIN.** Il balayait
+# `target/*/build` et concluait « objet C » sur tout `.o`/`.a` trouvé là. La
+# prémisse — ce chemin n'appartient qu'aux scripts de construction — **ne tient
+# pas** : cargo y range aussi des artefacts de rustc (cible `staticlib`, unités de
+# codegen). Constaté le 2026-10-09 dans le dépôt `air-service-locator-client`, où
+# le même critère a accusé une archive produite par rustc dans une crate SANS
+# `build.rs`.
+#
+# Un contrôle qui accuse le compilateur du langage qu'il protège est pire
+# qu'absent : on apprend à ignorer son verdict.
+#
+# On lit donc la section `.comment` de chaque objet, que le compilateur producteur
+# y écrit lui-même. Le détail, l'exemption des objets `compiler-rt` livrés par la
+# toolchain, et la posture fermée-par-défaut sont dans
+# `scripts/provenance-objets.py` — fichier PARTAGÉ avec les dépôts
+# `air-service-locator-{client,server}` : toute correction ici est due là-bas.
 #
 # Elle ne vaut que si une compilation a eu lieu ; sans `target/`, elle se tait
 # plutôt que de conclure.
-objets=""
-for repertoire in target/debug/build target/release/build; do
-    if [ -d "$repertoire" ]; then
-        # **`*.rcgu.o` N'EST PAS DU C** : c'est une unité de génération de code
-        # de `rustc` lui-même (`<crate>.<hash>-cgu.N.rcgu.o`), que le Mac laisse
-        # traîner sous `build/` pour les scripts de construction là où Linux les
-        # range ailleurs. Ce gate les prenait pour des objets C et rendait un
-        # ÉCHEC sur le poste de développement (2026-09-22). Un objet C n'a
-        # jamais ce nom.
-        trouves=$(find "$repertoire" \( -name '*.o' -o -name '*.a' \) ! -name '*.rcgu.o' 2>/dev/null | head -5 || true)
-        [ -n "$trouves" ] && objets="$objets$trouves"$'\n'
-    fi
-done
-if [ -n "${objets// /}" ]; then
-    echo "ÉCHEC : une compilation a produit des objets C :"
-    echo "$objets" | grep -v '^$' | sed 's/^/    /'
+# **CE QUE `main` AVAIT CORRIGÉ AUTREMENT, ET QUI EST REPRIS ICI.** Le 2026-09-22,
+# ce même critère rendait un ÉCHEC sur le poste de développement : il prenait pour
+# des objets C les `*.rcgu.o`, qui sont les unités de génération de code de `rustc`
+# lui-même, que le Mac laisse traîner sous `build/`. Le correctif d'alors les
+# excluait PAR LEUR NOM (`! -name '*.rcgu.o'`). Il tuait bien le faux positif, mais
+# il s'ouvrait du même geste : un objet C nommé `faux.rcgu.o` n'était plus regardé.
+# Éprouvé le 2026-10-10 — un objet produit par GCC 15.2.0 et nommé ainsi passait
+# le filtre par nom sans un mot, et la mesure de provenance le refuse en nommant
+# son producteur. Un nom est une convention ; une section `.comment` est une trace.
+if ! python3 scripts/provenance-objets.py; then
     violations=$((violations + 1))
 fi
 
@@ -110,6 +118,6 @@ if [ "$violations" -gt 0 ]; then
 fi
 
 echo "graphe    : $combien crates hors dépendances d'essai"
-echo "objets C  : aucun"
 echo
-echo "OK : ni \`ring\`, ni \`cc\`, ni crate \`*-sys\` — et pas un objet C compilé."
+echo "OK : ni \`ring\`, ni \`cc\`, ni crate \`*-sys\` — et aucun objet qu'un"
+echo "     compilateur C aurait produit (provenance MESURÉE, cf. critère 3)."
