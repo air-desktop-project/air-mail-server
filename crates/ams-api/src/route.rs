@@ -410,8 +410,14 @@ pub enum Resource<'o> {
 impl Resource<'_> {
     /// La portée qu'il faut pour l'atteindre avec cette méthode.
     ///
-    /// `None` pour ce qui ne demande aucune portée — c'est-à-dire l'échange de
-    /// jeton, et lui seul.
+    /// `None` pour ce qui ne demande aucune portée. **Cinq ressources, pas une** —
+    /// cette ligne disait « l'échange de jeton, et lui seul » alors que quatre
+    /// autres étaient déjà dans ce cas : les quatre portes d'entrée (`Tokens`,
+    /// `Devices`, `Sessions`, `SessionChallenge`), dont le corps porte ce qui
+    /// autorise, et `OpenApi`, qui n'est pas une porte mais une description. Le
+    /// compte exact est tenu dans les deux sens par la propriété 5 de
+    /// `fuzz_ams_api_route` ; c'est elle qui a refusé `OpenApi` tant que personne
+    /// ne l'avait déclarée.
     ///
     /// # LA MÉTHODE DÉCIDE DU DROIT, LA RESSOURCE DU DOMAINE
     ///
